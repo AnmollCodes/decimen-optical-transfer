@@ -8,6 +8,7 @@
 // - Progress must track frames COLLECTED: LT peeling back-loads its solve
 //   cascade, so blocks-solved looks stalled and then teleports to done.
 
+import { gzipDecompress } from "../shared/compress";
 import { LTDecoder } from "../shared/fountain";
 import { fnv1a, parseFrame } from "../shared/protocol";
 
@@ -156,10 +157,17 @@ function onDecoded(bytes: Uint8Array) {
   bar.style.width = `${(progress * 100).toFixed(1)}%`;
 
   if (decoder.isComplete) {
-    const payload = decoder.assemble()!;
+    // assemble() returns the COMPRESSED bytes (what traveled the optical channel)
+    const compressed = decoder.assemble()!;
     const seconds = (performance.now() - startTs) / 1000;
-    const ok = fnv1a(payload) === header.payloadFnv;
-    finish(payload, ok, seconds, header.totalLen);
+    // FNV is verified over compressed bytes — same as what the sender computed
+    const hashOk = fnv1a(compressed) === header.payloadFnv;
+    // Decompress to recover the original file bytes
+    void gzipDecompress(compressed).then((original) => {
+      finish(original, hashOk, seconds, compressed.length);
+    }).catch((err: unknown) => {
+      stats.textContent = `✗ decompression failed: ${err instanceof Error ? err.message : String(err)}`;
+    });
   }
 }
 
