@@ -7,12 +7,32 @@
 //   the next one — a generation counter prevents zombie capture loops.
 // - Progress must track frames COLLECTED: LT peeling back-loads its solve
 //   cascade, so blocks-solved looks stalled and then teleports to done.
+//
+// Phase 2 — decryption:
+// - The receiver must scan a small "key QR" before the main stream.
+//   The key QR contains "K:" + hex(32 raw AES-256-GCM key bytes).
+// - Order: fountain reconstruct → encrypted blob → FNV check → AES-GCM decrypt
+//   → gzip decompress → original file.
+// - FNV is verified over the encrypted blob (IV + ciphertext + tag), same as
+//   what the sender computed.
+// - AES-GCM auth tag failure surfaces as a clear error message — never silent.
+//
+// Concurrency safety:
+// - Multiple decode workers can deliver frames to onDecoded simultaneously.
+// - sessionKeyPromise uses a promise-based atomic check-and-set: the assignment
+//   happens synchronously before the first `await`, so no two concurrent calls
+//   can both observe sessionKeyPromise===null and both start key import.
 
 import { gzipDecompress } from "../shared/compress";
+import { aesGcmDecrypt, importKeyBytes } from "../shared/crypto";
 import { LTDecoder } from "../shared/fountain";
 import { fnv1a, parseFrame } from "../shared/protocol";
 
 const OVERHEAD_EST = 1.18; // expected frames ≈ K × this (robust-soliton ε)
+
+// Key prefix for the out-of-band key QR: "K:" + hex(32 bytes) = 66 chars total.
+const KEY_PREFIX = "K:";
+const KEY_HEX_LEN = 64; // 32 bytes × 2 hex chars
 
 const startBtn = document.getElementById("start") as HTMLButtonElement;
 const video = document.getElementById("video") as HTMLVideoElement;
@@ -25,12 +45,29 @@ const settings = document.getElementById("settings") as HTMLDetailsElement;
 const metricsEl = document.getElementById("metrics")!;
 const metric = (id: string) => document.getElementById(id)!;
 
+// Key-scan status banner — inserted dynamically so the HTML needs no changes.
+const keyBanner = document.createElement("div");
+keyBanner.id = "key-banner";
+keyBanner.style.cssText =
+  "display:none;padding:10px;background:#1a1a2e;border:2px solid #f0a500;" +
+  "border-radius:6px;color:#f0a500;font-family:monospace;font-size:13px;" +
+  "text-align:center;margin-bottom:10px;";
+keyBanner.textContent = "⌛ Waiting for key QR… point camera at the sender's key QR first.";
+stats.parentElement!.insertAdjacentElement("afterend", keyBanner);
+
 let stream: MediaStream | null = null;
 let decoder: LTDecoder | null = null;
 let sessionId = 0;
 let startTs = 0;
 let captureGen = 0;
 let done = false;
+
+// Session key promise — set ONCE, synchronously, by the first key-frame call.
+// Using Promise<CryptoKey> instead of CryptoKey|null means the assignment
+// happens before any await, making the check-and-set atomic in JS's
+// single-threaded model. Subsequent calls see a non-null promise and
+// await it rather than starting a second import.
+let sessionKeyPromise: Promise<CryptoKey> | null = null;
 
 const workers: Worker[] = [];
 const busy: boolean[] = [];
@@ -55,6 +92,7 @@ async function start() {
   startBtn.style.display = "none";
   preview.style.display = "block";
   metricsEl.style.display = "grid";
+  keyBanner.style.display = "block";
   const base: MediaTrackConstraints = {
     facingMode: "environment",
     width: { ideal: captureWidth },
@@ -78,7 +116,7 @@ async function start() {
   }
   video.srcObject = stream;
   await video.play().catch(() => undefined);
-  stats.textContent = `camera ${stream.getVideoTracks()[0]?.getSettings().width}×${stream.getVideoTracks()[0]?.getSettings().height}@${stream.getVideoTracks()[0]?.getSettings().frameRate} — searching for a stream…`;
+  stats.textContent = `camera ${stream.getVideoTracks()[0]?.getSettings().width}×${stream.getVideoTracks()[0]?.getSettings().height}@${stream.getVideoTracks()[0]?.getSettings().frameRate} — scan key QR first…`;
 
   for (let i = 0; i < workerCount; i++) {
     const w = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
@@ -87,7 +125,7 @@ async function start() {
       const { id, bytes } = e.data as { id: number; bytes: Uint8Array | null };
       if (id === -1) return; // warm-up
       busy[slot] = false;
-      if (bytes) onDecoded(bytes);
+      if (bytes) void onDecoded(bytes);
     };
     workers.push(w);
     busy.push(false);
@@ -141,8 +179,62 @@ function captureFrame() {
   ]);
 }
 
-function onDecoded(bytes: Uint8Array) {
+/**
+ * Synchronously inspect bytes for a key QR frame.
+ * If the bytes match the "K:" + hex(32 bytes) format, kick off importKeyBytes
+ * and return the resulting Promise<CryptoKey> WITHOUT awaiting it.
+ *
+ * Returning a Promise (not awaiting) is the key to the race fix: the caller
+ * can assign sessionKeyPromise = tryStartKeyImport(...) in a single sync
+ * statement before any yield point, so no concurrent onDecoded call can
+ * observe sessionKeyPromise===null after it has been set.
+ */
+function tryStartKeyImport(bytes: Uint8Array): Promise<CryptoKey> | null {
+  // Key QR data is UTF-8 text: "K:" + 64 hex chars (66 bytes total as UTF-8)
+  if (bytes.length !== KEY_PREFIX.length + KEY_HEX_LEN) return null;
+  if (bytes[0] !== 0x4b || bytes[1] !== 0x3a) return null; // "K:"
+  const hex = new TextDecoder().decode(bytes.subarray(2));
+  if (!/^[0-9a-f]{64}$/.test(hex)) return null;
+  const keyBytes = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) {
+    keyBytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  // importKeyBytes returns a Promise — we return it without awaiting.
+  // The caller stores this Promise synchronously, closing the race window.
+  return importKeyBytes(keyBytes).then((key) => {
+    keyBanner.style.cssText =
+      "display:block;padding:10px;background:#1a1a2e;border:2px solid #4ecca3;" +
+      "border-radius:6px;color:#4ecca3;font-family:monospace;font-size:13px;" +
+      "text-align:center;margin-bottom:10px;";
+    keyBanner.textContent = "✓ Key received — now scan the main QR stream.";
+    stats.textContent = `camera ready — scanning main stream…`;
+    return key;
+  });
+}
+
+async function onDecoded(bytes: Uint8Array): Promise<void> {
   decodeTimes.push(performance.now());
+
+  // Atomic check-and-set: no await between the null-check and the assignment.
+  // JS is single-threaded; async functions execute synchronously up to their
+  // first await. The assignment below is that first yield-free statement, so
+  // no concurrent onDecoded call can observe sessionKeyPromise===null after
+  // the first call has set it — regardless of how many workers are running.
+  if (!sessionKeyPromise) {
+    const kp = tryStartKeyImport(bytes); // sync: returns Promise or null immediately
+    if (kp) sessionKeyPromise = kp;      // sync assignment — no yield before this
+    return; // drop this frame: either just started key import or no key yet
+  }
+
+  // Await the key (may already be resolved if import finished, or still pending).
+  let key: CryptoKey;
+  try {
+    key = await sessionKeyPromise;
+  } catch (err: unknown) {
+    stats.textContent = `✗ key import failed: ${err instanceof Error ? err.message : String(err)}`;
+    return;
+  }
+
   const parsed = parseFrame(bytes);
   if (!parsed || done) return;
   const { header, block } = parsed;
@@ -157,17 +249,29 @@ function onDecoded(bytes: Uint8Array) {
   bar.style.width = `${(progress * 100).toFixed(1)}%`;
 
   if (decoder.isComplete) {
-    // assemble() returns the COMPRESSED bytes (what traveled the optical channel)
-    const compressed = decoder.assemble()!;
+    // assemble() returns the encrypted blob (IV + ciphertext + auth tag).
+    const encryptedBlob = decoder.assemble()!;
     const seconds = (performance.now() - startTs) / 1000;
-    // FNV is verified over compressed bytes — same as what the sender computed
-    const hashOk = fnv1a(compressed) === header.payloadFnv;
-    // Decompress to recover the original file bytes
-    void gzipDecompress(compressed).then((original) => {
-      finish(original, hashOk, seconds, compressed.length);
-    }).catch((err: unknown) => {
-      stats.textContent = `✗ decompression failed: ${err instanceof Error ? err.message : String(err)}`;
-    });
+    // FNV verified over encrypted blob — same as what the sender computed.
+    const hashOk = fnv1a(encryptedBlob) === header.payloadFnv;
+
+    // Decrypt. AES-GCM auth tag failure throws — surface it as a user error.
+    let compressed: Uint8Array;
+    try {
+      compressed = await aesGcmDecrypt(key, encryptedBlob);
+    } catch (err: unknown) {
+      stats.textContent = `✗ decryption failed (auth tag mismatch or wrong key): ${err instanceof Error ? err.message : String(err)}`;
+      return;
+    }
+
+    // Decompress to recover the original file.
+    void gzipDecompress(compressed)
+      .then((original) => {
+        finish(original, hashOk, seconds, encryptedBlob.length);
+      })
+      .catch((err: unknown) => {
+        stats.textContent = `✗ decompression failed: ${err instanceof Error ? err.message : String(err)}`;
+      });
   }
 }
 
@@ -177,6 +281,7 @@ function finish(payload: Uint8Array, hashOk: boolean, seconds: number, totalLen:
   stream?.getTracks().forEach((t) => t.stop());
   preview.style.display = "none";
   bar.style.width = "100%";
+  keyBanner.style.display = "none";
   const kb = Math.round(totalLen / 1024);
   const rate = (totalLen / 1024 / seconds).toFixed(1);
   stats.textContent = `${kb} KB in ${seconds.toFixed(1)} s · ${rate} KB/s · hash ${hashOk ? "verified ✓" : "MISMATCH ✗"}`;
