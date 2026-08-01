@@ -16,6 +16,12 @@
 // - FNV is verified over the encrypted blob (IV + ciphertext + tag), same as
 //   what the sender computed.
 // - AES-GCM auth tag failure surfaces as a clear error message — never silent.
+//
+// Concurrency safety:
+// - Multiple decode workers can deliver frames to onDecoded simultaneously.
+// - sessionKeyPromise uses a promise-based atomic check-and-set: the assignment
+//   happens synchronously before the first `await`, so no two concurrent calls
+//   can both observe sessionKeyPromise===null and both start key import.
 
 import { gzipDecompress } from "../shared/compress";
 import { aesGcmDecrypt, importKeyBytes } from "../shared/crypto";
@@ -56,8 +62,12 @@ let startTs = 0;
 let captureGen = 0;
 let done = false;
 
-// Session key — set once by scanning the key QR, used for all decryption.
-let sessionKey: CryptoKey | null = null;
+// Session key promise — set ONCE, synchronously, by the first key-frame call.
+// Using Promise<CryptoKey> instead of CryptoKey|null means the assignment
+// happens before any await, making the check-and-set atomic in JS's
+// single-threaded model. Subsequent calls see a non-null promise and
+// await it rather than starting a second import.
+let sessionKeyPromise: Promise<CryptoKey> | null = null;
 
 const workers: Worker[] = [];
 const busy: boolean[] = [];
@@ -169,34 +179,60 @@ function captureFrame() {
   ]);
 }
 
-/** Try to parse a key QR frame. Returns true if the frame was a valid key frame. */
-async function tryHandleKeyFrame(bytes: Uint8Array): Promise<boolean> {
-  // Key QR data is UTF-8 text: "K:" + 64 hex chars
-  if (bytes.length !== KEY_PREFIX.length + KEY_HEX_LEN) return false;
-  if (bytes[0] !== 0x4b || bytes[1] !== 0x3a) return false; // "K:"
+/**
+ * Synchronously inspect bytes for a key QR frame.
+ * If the bytes match the "K:" + hex(32 bytes) format, kick off importKeyBytes
+ * and return the resulting Promise<CryptoKey> WITHOUT awaiting it.
+ *
+ * Returning a Promise (not awaiting) is the key to the race fix: the caller
+ * can assign sessionKeyPromise = tryStartKeyImport(...) in a single sync
+ * statement before any yield point, so no concurrent onDecoded call can
+ * observe sessionKeyPromise===null after it has been set.
+ */
+function tryStartKeyImport(bytes: Uint8Array): Promise<CryptoKey> | null {
+  // Key QR data is UTF-8 text: "K:" + 64 hex chars (66 bytes total as UTF-8)
+  if (bytes.length !== KEY_PREFIX.length + KEY_HEX_LEN) return null;
+  if (bytes[0] !== 0x4b || bytes[1] !== 0x3a) return null; // "K:"
   const hex = new TextDecoder().decode(bytes.subarray(2));
-  if (!/^[0-9a-f]{64}$/.test(hex)) return false;
+  if (!/^[0-9a-f]{64}$/.test(hex)) return null;
   const keyBytes = new Uint8Array(32);
   for (let i = 0; i < 32; i++) {
     keyBytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
   }
-  sessionKey = await importKeyBytes(keyBytes);
-  keyBanner.style.cssText =
-    "display:block;padding:10px;background:#1a1a2e;border:2px solid #4ecca3;" +
-    "border-radius:6px;color:#4ecca3;font-family:monospace;font-size:13px;" +
-    "text-align:center;margin-bottom:10px;";
-  keyBanner.textContent = "✓ Key received — now scan the main QR stream.";
-  stats.textContent = `camera ready — scanning main stream…`;
-  return true;
+  // importKeyBytes returns a Promise — we return it without awaiting.
+  // The caller stores this Promise synchronously, closing the race window.
+  return importKeyBytes(keyBytes).then((key) => {
+    keyBanner.style.cssText =
+      "display:block;padding:10px;background:#1a1a2e;border:2px solid #4ecca3;" +
+      "border-radius:6px;color:#4ecca3;font-family:monospace;font-size:13px;" +
+      "text-align:center;margin-bottom:10px;";
+    keyBanner.textContent = "✓ Key received — now scan the main QR stream.";
+    stats.textContent = `camera ready — scanning main stream…`;
+    return key;
+  });
 }
 
 async function onDecoded(bytes: Uint8Array): Promise<void> {
   decodeTimes.push(performance.now());
 
-  // Check for key QR frame first (before trying parseFrame).
-  if (!sessionKey) {
-    await tryHandleKeyFrame(bytes);
-    return; // either it was a key frame (handled) or an encrypted data frame we can't use yet
+  // Atomic check-and-set: no await between the null-check and the assignment.
+  // JS is single-threaded; async functions execute synchronously up to their
+  // first await. The assignment below is that first yield-free statement, so
+  // no concurrent onDecoded call can observe sessionKeyPromise===null after
+  // the first call has set it — regardless of how many workers are running.
+  if (!sessionKeyPromise) {
+    const kp = tryStartKeyImport(bytes); // sync: returns Promise or null immediately
+    if (kp) sessionKeyPromise = kp;      // sync assignment — no yield before this
+    return; // drop this frame: either just started key import or no key yet
+  }
+
+  // Await the key (may already be resolved if import finished, or still pending).
+  let key: CryptoKey;
+  try {
+    key = await sessionKeyPromise;
+  } catch (err: unknown) {
+    stats.textContent = `✗ key import failed: ${err instanceof Error ? err.message : String(err)}`;
+    return;
   }
 
   const parsed = parseFrame(bytes);
@@ -222,7 +258,7 @@ async function onDecoded(bytes: Uint8Array): Promise<void> {
     // Decrypt. AES-GCM auth tag failure throws — surface it as a user error.
     let compressed: Uint8Array;
     try {
-      compressed = await aesGcmDecrypt(sessionKey, encryptedBlob);
+      compressed = await aesGcmDecrypt(key, encryptedBlob);
     } catch (err: unknown) {
       stats.textContent = `✗ decryption failed (auth tag mismatch or wrong key): ${err instanceof Error ? err.message : String(err)}`;
       return;
