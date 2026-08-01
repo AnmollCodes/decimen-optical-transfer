@@ -4,26 +4,30 @@
 //
 // Layout (little-endian), 20 bytes, followed by `blockLen` payload bytes:
 //   0  u8   magic 0xD1
-//   1  u8   version  0x01 = gzip-compressed payload (was 0x0C in proto v0)
+//   1  u8   version  (see PROTO_VERSION below)
 //   2  u16  sessionId   random per sender start
 //   4  u32  seq         drives the fountain PRNG (see fountain.ts)
 //   8  u16  k           source block count
 //  10  u16  blockLen    payload bytes per frame
-//  12  u32  totalLen    compressed byte count (what travels the optical channel)
-//  16  u32  payloadFnv  FNV-1a of the COMPRESSED bytes — verified on completion
+//  12  u32  totalLen    encrypted ciphertext length (IV + ciphertext + auth tag)
+//  16  u32  payloadFnv  FNV-1a of the encrypted bytes — verified on completion
 //
 // Protocol versioning:
-//   v0 (original): byte 1 = 0x0C (second magic). Receivers expected [0xD1, 0x0C].
-//   v1 (this version): byte 1 = 0x01, signals gzip-compressed payload.
-//   A v0 receiver's parseFrame checks bytes[1] !== 0x0C and returns null for
-//   any v1 frame — clean failure, no silent data corruption.
-//   A v1 receiver rejects unknown version bytes (anything ≠ 0x01) the same way.
+//   v0 (original): byte 1 = 0x0C (second magic). Raw uncompressed payload.
+//   v1: byte 1 = 0x01. gzip-compressed payload.
+//   v2: byte 1 = 0x02. gzip-compressed THEN AES-256-GCM encrypted payload.
+//       Key is delivered out-of-band via a separate QR code shown at session start.
+//       Wire format of encrypted blob: [12-byte IV || AES-GCM ciphertext+auth-tag].
+//
+// Backward compatibility: parseFrame rejects any version not in ACCEPTED_VERSIONS,
+// returning null (clean failure, no silent corruption or misparse).
 
 export const HEADER_LEN = 20;
 const MAGIC0 = 0xd1;
-export const PROTO_VERSION = 0x01;
+export const PROTO_VERSION = 0x02;
 
-// Accepted version bytes. Extend this set when adding future protocol versions.
+// Accepted version bytes. A v2 receiver rejects v0/v1 frames; this is intentional
+// — a v0/v1 sender and v2 receiver are not protocol-compatible.
 const ACCEPTED_VERSIONS = new Set([PROTO_VERSION]);
 
 export interface FrameHeader {

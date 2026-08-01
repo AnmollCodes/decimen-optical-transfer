@@ -11,9 +11,19 @@
 //   the transition; 24 fps on a 60 Hz screen is comfortable.
 // - Error correction stays at L by default: the fountain layer already
 //   handles erasures, and a frame is either decoded whole or discarded.
+//
+// Phase 2 — encryption:
+// - Key delivery: a separate "key QR" is shown before the main stream.
+//   The receiver scans it once to obtain the AES-256-GCM session key.
+//   The key is encoded as "K:" + hex(32 raw key bytes) — 66 chars total,
+//   fits comfortably in a V3/ECC-M QR code. The "K:" prefix lets the
+//   receiver distinguish it from fountain-coded data frames.
+// - IV: 12 bytes prepended to the ciphertext blob; generated fresh per session.
+// - FNV hash and totalLen are over the encrypted blob (IV + ciphertext + tag).
 
 import QRCode from "qrcode";
 import { gzipCompress } from "../shared/compress";
+import { aesGcmEncrypt, exportKeyBytes, generateAesKey } from "../shared/crypto";
 import { LTEncoder } from "../shared/fountain";
 import { HEADER_LEN, PROTO_VERSION, fnv1a, packFrame, type FrameHeader } from "../shared/protocol";
 
@@ -28,6 +38,19 @@ const cfgBytes = document.getElementById("cfg-bytes") as HTMLSelectElement;
 const cfgEcc = document.getElementById("cfg-ecc") as HTMLSelectElement;
 const cfgSize = document.getElementById("cfg-size") as HTMLInputElement;
 
+// Key-QR overlay — created dynamically so the HTML doesn't need modification.
+const keyStage = document.createElement("div");
+keyStage.id = "key-stage";
+keyStage.style.cssText =
+  "display:none;text-align:center;margin:16px 0;padding:12px;background:#1a1a2e;" +
+  "border:2px solid #4ecca3;border-radius:8px;";
+const keyCanvas = document.createElement("canvas");
+const keyLabel = document.createElement("div");
+keyLabel.style.cssText = "color:#4ecca3;font-size:14px;margin-top:8px;font-family:monospace;";
+keyLabel.textContent = "① Scan this key QR on the receiver first, then the transfer begins.";
+keyStage.append(keyCanvas, keyLabel);
+canvas.parentElement!.insertAdjacentElement("beforebegin", keyStage);
+
 const payloadCache = new Map<string, Uint8Array>();
 let generation = 0; // bumped on every restart; stale loops see it and die
 
@@ -39,6 +62,15 @@ async function loadPayload(url: string): Promise<Uint8Array | null> {
   const bytes = new Uint8Array(await res.arrayBuffer());
   payloadCache.set(url, bytes);
   return bytes;
+}
+
+/** Render a string value into a canvas element as a QR code. */
+async function renderKeyQr(text: string): Promise<void> {
+  await QRCode.toCanvas(keyCanvas, text, {
+    errorCorrectionLevel: "M",
+    margin: 2,
+    width: 200,
+  });
 }
 
 async function main() {
@@ -67,10 +99,21 @@ async function startStream() {
   const ecc = cfgEcc.value as "L" | "M" | "Q" | "H";
   const displayPx = Number(cfgSize.value);
 
-  // Compress before fountain encoding. The fountain layer transports the
-  // compressed bytes; FNV is computed over those bytes so the receiver can
-  // verify optical-channel integrity independently of decompression.
-  const payload = await gzipCompress(rawPayload);
+  // Step 1: Compress.
+  const compressed = await gzipCompress(rawPayload);
+
+  // Step 2: Generate session key and render the key QR for the receiver to scan.
+  const sessionKey = await generateAesKey();
+  const keyBytes = await exportKeyBytes(sessionKey);
+  const keyHex = Array.from(keyBytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+  keyStage.style.display = "block";
+  await renderKeyQr(`K:${keyHex}`);
+
+  // Step 3: Encrypt (compress → encrypt → fountain).
+  // The fountain layer transports the encrypted blob; FNV and totalLen cover it.
+  const payload = await aesGcmEncrypt(sessionKey, compressed);
+
+  if (gen !== generation) return; // superseded while encrypting
 
   const sessionId = (Math.floor(Math.random() * 0xffff) + 1) & 0xffff;
   const blockLen = frameBytes - HEADER_LEN;
@@ -81,8 +124,8 @@ async function startStream() {
     seq: 0,
     k: encoder.k,
     blockLen,
-    totalLen: payload.length,     // compressed length
-    payloadFnv: fnv1a(payload),   // FNV of compressed bytes
+    totalLen: payload.length,     // encrypted blob length (IV + ciphertext + tag)
+    payloadFnv: fnv1a(payload),   // FNV of encrypted blob
   };
 
   let version: number | undefined; // locked after the first frame
@@ -119,7 +162,9 @@ async function startStream() {
       sizeCanvas();
       specs.textContent =
         `${txFps} FPS · ${frameBytes} bytes per frame · V${version} · ECC ${ecc} · ` +
-        `${Math.round(rawPayload.length / 1024)} KB raw → ${Math.round(payload.length / 1024)} KB compressed · K=${encoder.k}`;
+        `${Math.round(rawPayload.length / 1024)} KB raw → ` +
+        `${Math.round(compressed.length / 1024)} KB compressed → ` +
+        `${Math.round(payload.length / 1024)} KB encrypted · K=${encoder.k}`;
     }
     const size = qr.modules.size;
     const data = qr.modules.data;
