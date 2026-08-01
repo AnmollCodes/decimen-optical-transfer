@@ -8,7 +8,10 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint shared send receive tests",
+    "test": "vitest run --config vitest.config.ts"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",
