@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { fnv1a, packFrame, parseFrame, splitmix32 } from "../shared/protocol";
+import { PROTO_VERSION, fnv1a, packFrame, parseFrame, splitmix32 } from "../shared/protocol";
 
 // ---------------------------------------------------------------------------
 // fnv1a golden vectors
@@ -106,7 +106,10 @@ describe("splitmix32", () => {
 // ---------------------------------------------------------------------------
 
 describe("packFrame / parseFrame", () => {
+  // The canonical header used in round-trip tests.
+  // version=PROTO_VERSION is now required by FrameHeader.
   const HEADER = {
+    version: PROTO_VERSION,
     sessionId: 0xabcd,
     seq: 0x12345678,
     k: 400,
@@ -127,23 +130,40 @@ describe("packFrame / parseFrame", () => {
     expect(parsed!.block[HEADER.blockLen - 1]).toBe(0x42);
   });
 
+  it("version field round-trips: PROTO_VERSION is parsed back correctly", () => {
+    const block = new Uint8Array(10);
+    const frame = packFrame(
+      { version: PROTO_VERSION, sessionId: 1, seq: 0, k: 1, blockLen: 10, totalLen: 1, payloadFnv: 0 },
+      block,
+    );
+    const parsed = parseFrame(frame);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.header.version).toBe(PROTO_VERSION);
+  });
+
   it("rejects a frame with wrong first magic byte", () => {
     const block = new Uint8Array(10);
     const frame = packFrame(
-      { sessionId: 1, seq: 0, k: 1, blockLen: 10, totalLen: 10, payloadFnv: 0 },
+      { version: PROTO_VERSION, sessionId: 1, seq: 0, k: 1, blockLen: 10, totalLen: 10, payloadFnv: 0 },
       block,
     );
     frame[0] = 0x00;
     expect(parseFrame(frame)).toBeNull();
   });
 
-  it("rejects a frame with wrong second magic byte", () => {
+  // Phase 1: byte 1 is now a protocol version byte, not a second magic.
+  // Version 0x00 is not in ACCEPTED_VERSIONS, so parseFrame returns null.
+  // Old v0 receivers that checked bytes[1] !== 0x0C will also reject v1
+  // frames (byte 1 = 0x01) cleanly — no silent corruption.
+  it("rejects unknown version byte in byte position 1", () => {
     const block = new Uint8Array(10);
     const frame = packFrame(
-      { sessionId: 1, seq: 0, k: 1, blockLen: 10, totalLen: 10, payloadFnv: 0 },
+      { version: PROTO_VERSION, sessionId: 1, seq: 0, k: 1, blockLen: 10, totalLen: 10, payloadFnv: 0 },
       block,
     );
-    frame[1] = 0x00;
+    frame[1] = 0x00; // 0x00 is not in ACCEPTED_VERSIONS
+    expect(parseFrame(frame)).toBeNull();
+    frame[1] = 0xff; // neither is 0xff
     expect(parseFrame(frame)).toBeNull();
   });
 
@@ -155,7 +175,7 @@ describe("packFrame / parseFrame", () => {
   it("rejects k=0", () => {
     const block = new Uint8Array(1);
     const frame = packFrame(
-      { sessionId: 1, seq: 0, k: 0, blockLen: 1, totalLen: 1, payloadFnv: 0 },
+      { version: PROTO_VERSION, sessionId: 1, seq: 0, k: 0, blockLen: 1, totalLen: 1, payloadFnv: 0 },
       block,
     );
     expect(parseFrame(frame)).toBeNull();
@@ -165,7 +185,7 @@ describe("packFrame / parseFrame", () => {
     // packFrame with blockLen=0 produces a header-only frame (length===HEADER_LEN)
     // which parseFrame also rejects as too short.
     const frame = packFrame(
-      { sessionId: 1, seq: 0, k: 1, blockLen: 0, totalLen: 1, payloadFnv: 0 },
+      { version: PROTO_VERSION, sessionId: 1, seq: 0, k: 1, blockLen: 0, totalLen: 1, payloadFnv: 0 },
       new Uint8Array(0),
     );
     expect(parseFrame(frame)).toBeNull();
@@ -174,7 +194,7 @@ describe("packFrame / parseFrame", () => {
   it("rejects totalLen=0", () => {
     const block = new Uint8Array(10);
     const frame = packFrame(
-      { sessionId: 1, seq: 0, k: 1, blockLen: 10, totalLen: 0, payloadFnv: 0 },
+      { version: PROTO_VERSION, sessionId: 1, seq: 0, k: 1, blockLen: 10, totalLen: 0, payloadFnv: 0 },
       block,
     );
     expect(parseFrame(frame)).toBeNull();
@@ -182,13 +202,14 @@ describe("packFrame / parseFrame", () => {
 
   it("header is little-endian: sessionId 0x1234 → bytes [0x34, 0x12] at offset 2-3", () => {
     const frame = packFrame(
-      { sessionId: 0x1234, seq: 0, k: 1, blockLen: 10, totalLen: 1, payloadFnv: 0 },
+      { version: PROTO_VERSION, sessionId: 0x1234, seq: 0, k: 1, blockLen: 10, totalLen: 1, payloadFnv: 0 },
       new Uint8Array(10),
     );
     expect(frame[2]).toBe(0x34);
     expect(frame[3]).toBe(0x12);
   });
 });
+
 
 // ---------------------------------------------------------------------------
 // Inline reference implementation — independent cross-check for splitmix32

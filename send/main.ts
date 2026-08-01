@@ -13,8 +13,9 @@
 //   handles erasures, and a frame is either decoded whole or discarded.
 
 import QRCode from "qrcode";
+import { gzipCompress } from "../shared/compress";
 import { LTEncoder } from "../shared/fountain";
-import { HEADER_LEN, fnv1a, packFrame, type FrameHeader } from "../shared/protocol";
+import { HEADER_LEN, PROTO_VERSION, fnv1a, packFrame, type FrameHeader } from "../shared/protocol";
 
 const MARGIN = 4; // quiet-zone modules
 const LOOKAHEAD = 3;
@@ -55,8 +56,8 @@ async function main() {
 
 async function startStream() {
   const gen = ++generation;
-  const payload = await loadPayload(cfgPayload.value);
-  if (!payload) {
+  const rawPayload = await loadPayload(cfgPayload.value);
+  if (!rawPayload) {
     specs.textContent = `✗ couldn't load ${cfgPayload.value}`;
     return;
   }
@@ -66,16 +67,22 @@ async function startStream() {
   const ecc = cfgEcc.value as "L" | "M" | "Q" | "H";
   const displayPx = Number(cfgSize.value);
 
+  // Compress before fountain encoding. The fountain layer transports the
+  // compressed bytes; FNV is computed over those bytes so the receiver can
+  // verify optical-channel integrity independently of decompression.
+  const payload = await gzipCompress(rawPayload);
+
   const sessionId = (Math.floor(Math.random() * 0xffff) + 1) & 0xffff;
   const blockLen = frameBytes - HEADER_LEN;
   const encoder = new LTEncoder(payload, blockLen, sessionId);
   const header: FrameHeader = {
+    version: PROTO_VERSION,
     sessionId,
     seq: 0,
     k: encoder.k,
     blockLen,
-    totalLen: payload.length,
-    payloadFnv: fnv1a(payload),
+    totalLen: payload.length,     // compressed length
+    payloadFnv: fnv1a(payload),   // FNV of compressed bytes
   };
 
   let version: number | undefined; // locked after the first frame
@@ -112,7 +119,7 @@ async function startStream() {
       sizeCanvas();
       specs.textContent =
         `${txFps} FPS · ${frameBytes} bytes per frame · V${version} · ECC ${ecc} · ` +
-        `${Math.round(payload.length / 1024)} KB payload · K=${encoder.k}`;
+        `${Math.round(rawPayload.length / 1024)} KB raw → ${Math.round(payload.length / 1024)} KB compressed · K=${encoder.k}`;
     }
     const size = qr.modules.size;
     const data = qr.modules.data;
