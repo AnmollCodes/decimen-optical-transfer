@@ -17,6 +17,14 @@
 //   what the sender computed.
 // - AES-GCM auth tag failure surfaces as a clear error message — never silent.
 //
+// Phase 3 — multi-QR grid:
+// - Worker now returns { id, results: Uint8Array[], cellDecodeMs } instead of
+//   { id, bytes: Uint8Array | null }.
+// - Each entry in results[] is an independently decoded QR code from the same
+//   camera frame (one entry per grid cell that zxing successfully decoded).
+// - Each decoded cell is fed into onDecoded independently — no codec changes.
+// - cellsDecoded ring-buffer tracks cells/sec for real throughput telemetry.
+//
 // Concurrency safety:
 // - Multiple decode workers can deliver frames to onDecoded simultaneously.
 // - sessionKeyPromise uses a promise-based atomic check-and-set: the assignment
@@ -62,24 +70,25 @@ let startTs = 0;
 let captureGen = 0;
 let done = false;
 
+// Grid density: how many QR cells the sender renders per display frame.
+// Must match the sender setting. Updated on each start().
+let gridCells = 1;
+
 // Session key promise — set ONCE, synchronously, by the first key-frame call.
-// Using Promise<CryptoKey> instead of CryptoKey|null means the assignment
-// happens before any await, making the check-and-set atomic in JS's
-// single-threaded model. Subsequent calls see a non-null promise and
-// await it rather than starting a second import.
 let sessionKeyPromise: Promise<CryptoKey> | null = null;
 
 const workers: Worker[] = [];
 const busy: boolean[] = [];
 const captureTimes: number[] = [];
 const decodeTimes: number[] = [];
+// Tracks individual cell decode completions (one per successfully decoded QR
+// code) for cells/sec telemetry. Updated in the worker message handler.
+const cellDecodeTimes: number[] = [];
 
 startBtn.onclick = () => void start();
 
 async function start() {
   if (!navigator.mediaDevices?.getUserMedia) {
-    // On insecure origins the API doesn't exist AT ALL — this is the plain-
-    // http-over-LAN case. localhost is exempt; other hosts need https.
     stats.textContent =
       "✗ camera needs a secure context — this page must be served over " +
       "https to use the camera from another device (npm run dev:https).";
@@ -88,6 +97,10 @@ async function start() {
   const captureWidth = Number((document.getElementById("cfg-width") as HTMLSelectElement).value);
   const captureFps = Number((document.getElementById("cfg-capfps") as HTMLSelectElement).value);
   const workerCount = Number((document.getElementById("cfg-workers") as HTMLSelectElement).value);
+  // Read grid density from settings (cfg-grid select, added in Phase 3).
+  // Falls back to 1 if the element doesn't exist (backward compat).
+  const cfgGrid = document.getElementById("cfg-grid") as HTMLSelectElement | null;
+  gridCells = cfgGrid ? Number(cfgGrid.value) : 1;
   settings.style.display = "none";
   startBtn.style.display = "none";
   preview.style.display = "block";
@@ -122,10 +135,21 @@ async function start() {
     const w = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
     const slot = i;
     w.onmessage = (e: MessageEvent) => {
-      const { id, bytes } = e.data as { id: number; bytes: Uint8Array | null };
+      const { id, results, cellDecodeMs } = e.data as {
+        id: number;
+        results: Uint8Array[];
+        cellDecodeMs: number;
+      };
       if (id === -1) return; // warm-up
       busy[slot] = false;
-      if (bytes) void onDecoded(bytes);
+      void cellDecodeMs; // used for future per-cell timing telemetry (captured but not displayed yet)
+      const now = performance.now();
+      for (const bytes of results) {
+        // Record a decode-time entry for each successfully decoded cell.
+        decodeTimes.push(now);
+        cellDecodeTimes.push(now);
+        void onDecoded(bytes);
+      }
     };
     workers.push(w);
     busy.push(false);
@@ -174,9 +198,11 @@ function captureFrame() {
   ctx.drawImage(video, 0, 0);
   const img = ctx.getImageData(0, 0, vw, vh);
   busy[slot] = true;
-  workers[slot]!.postMessage({ id: frameId++, buf: img.data.buffer, w: vw, h: vh }, [
-    img.data.buffer,
-  ]);
+  // Pass gridCells as maxSymbols so the worker searches for all cells.
+  workers[slot]!.postMessage(
+    { id: frameId++, buf: img.data.buffer, w: vw, h: vh, maxSymbols: gridCells },
+    [img.data.buffer],
+  );
 }
 
 /**
@@ -302,8 +328,12 @@ function updateStats() {
   };
   prune(captureTimes);
   prune(decodeTimes);
+  prune(cellDecodeTimes);
   metric("m-cap").textContent = (captureTimes.length / 2).toFixed(0);
   metric("m-dec").textContent = (decodeTimes.length / 2).toFixed(1);
+  // cells/sec: how many individual QR cells were successfully decoded in last 2s
+  const mCells = document.getElementById("m-cells");
+  if (mCells) mCells.textContent = (cellDecodeTimes.length / 2).toFixed(1);
   if (!decoder) return;
   const elapsed = (now - startTs) / 1000;
   const kbs = (decoder.framesNew * decoder.blockLen) / OVERHEAD_EST / 1024 / Math.max(0.1, elapsed);

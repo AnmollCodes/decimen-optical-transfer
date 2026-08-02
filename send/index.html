@@ -54,6 +54,15 @@
           display size
           <input id="cfg-size" type="range" min="300" max="1200" step="50" value="900" />
         </label>
+        <label>
+          grid density
+          <select id="cfg-grid">
+            <option value="1" selected>1×1 (single)</option>
+            <option value="4">2×2 (4 cells)</option>
+            <option value="9">3×3 (9 cells)</option>
+            <option value="16">4×4 (16 cells)</option>
+          </select>
+        </label>
       </div>
       <div class="hint" style="text-align: left; padding-top: 8px">
         Changes restart the stream — the receiver resets automatically (new

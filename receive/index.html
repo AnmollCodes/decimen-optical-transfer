@@ -36,6 +36,16 @@
             <option>1</option>
             <option selected>2</option>
             <option>3</option>
+            <option>4</option>
+          </select>
+        </label>
+        <label>
+          grid density
+          <select id="cfg-grid">
+            <option value="1" selected>1×1 (single)</option>
+            <option value="4">2×2 (4 cells)</option>
+            <option value="9">3×3 (9 cells)</option>
+            <option value="16">4×4 (16 cells)</option>
           </select>
         </label>
       </div>
@@ -49,6 +59,7 @@
     <div class="metrics" id="metrics" style="display: none">
       <div class="metric"><div class="k">capture fps</div><div class="v" id="m-cap">—</div></div>
       <div class="metric"><div class="k">decode fps</div><div class="v amber" id="m-dec">—</div></div>
+      <div class="metric"><div class="k">cells/sec</div><div class="v amber" id="m-cells">—</div></div>
       <div class="metric"><div class="k">goodput</div><div class="v amber" id="m-rate">—</div></div>
       <div class="metric"><div class="k">elapsed</div><div class="v" id="m-time">—</div></div>
       <div class="metric"><div class="k">frames new/dup</div><div class="v" id="m-frames">—</div></div>
