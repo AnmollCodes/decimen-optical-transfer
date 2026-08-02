@@ -73,6 +73,15 @@ canvas.parentElement!.insertAdjacentElement("beforebegin", keyStage);
 const payloadCache = new Map<string, Uint8Array>();
 let generation = 0; // bumped on every restart; stale loops see it and die
 
+// DIAGNOSTIC: large unmissable banner showing active grid mode.
+// Inserted once after the specs line; updated on every startStream().
+const gridBanner = document.createElement("div");
+gridBanner.id = "grid-banner";
+gridBanner.style.cssText =
+  "font-family:monospace;font-size:18px;font-weight:bold;text-align:center;" +
+  "padding:8px;margin:8px 0;border-radius:6px;border:3px solid;";
+specs.insertAdjacentElement("afterend", gridBanner);
+
 async function loadPayload(url: string): Promise<Uint8Array | null> {
   const hit = payloadCache.get(url);
   if (hit) return hit;
@@ -119,10 +128,22 @@ async function startStream() {
   const frameBytes = Number(cfgBytes.value);
   const ecc = cfgEcc.value as "L" | "M" | "Q" | "H";
   const displayPx = Number(cfgSize.value);
-  // gridCells: total cells per displayed frame (1, 4, 9, or 16).
-  // gridCols: number of columns (and rows) — sqrt of gridCells.
   const gridCells = cfgGrid ? Number(cfgGrid.value) : 1;
   const gridCols = Math.round(Math.sqrt(gridCells));
+
+  // DIAGNOSTIC: update banner immediately so it's visible before crypto runs.
+  if (gridCells > 1) {
+    gridBanner.textContent = `GRID ACTIVE: ${gridCols}×${gridCols} = ${gridCells} CELLS/FRAME`;
+    gridBanner.style.color = "#4ecca3";
+    gridBanner.style.borderColor = "#4ecca3";
+    gridBanner.style.background = "#0d2b22";
+  } else {
+    gridBanner.textContent = `SINGLE QR (1×1) — grid OFF`;
+    gridBanner.style.color = "#888";
+    gridBanner.style.borderColor = "#555";
+    gridBanner.style.background = "#1a1a1a";
+  }
+  console.log(`[SENDER] startStream: gridCells=${gridCells} gridCols=${gridCols} cfgGrid.value=${cfgGrid?.value ?? "(no element)"}`);
 
   // Step 1: Compress.
   const compressed = await gzipCompress(rawPayload);
