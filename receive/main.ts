@@ -113,7 +113,16 @@ async function start() {
   metricsEl.style.display = "grid";
   keyBanner.style.display = "block";
   const mDiagEl = document.getElementById("m-diag");
-  if (mDiagEl) mDiagEl.style.display = "block";
+  if (mDiagEl) {
+    mDiagEl.style.display = "block";
+    // Insert frameSnap canvas and download button after m-diag (idempotent).
+    if (!document.getElementById("frame-snap")) {
+      mDiagEl.insertAdjacentElement("afterend", snapBtn);
+      mDiagEl.insertAdjacentElement("afterend", frameSnap);
+    }
+    frameSnap.style.display = "block";
+    snapBtn.style.display = "inline-block";
+  }
   const base: MediaTrackConstraints = {
     facingMode: "environment",
     width: { ideal: captureWidth },
@@ -205,6 +214,30 @@ function scheduleFrame(gen: number) {
 const grab = document.createElement("canvas");
 let frameId = 0;
 
+// DIAGNOSTIC: small preview canvas mirroring the last captured frame.
+// Updated at most every 500ms (throttled) to avoid per-frame painting overhead.
+// grab remains valid after getImageData() so we can drawImage from it.
+const frameSnap = document.createElement("canvas");
+frameSnap.id = "frame-snap";
+frameSnap.style.cssText =
+  "display:none;max-width:100%;border:1px solid #f0a500;margin:4px 8px;";
+const snapBtn = document.createElement("button");
+snapBtn.id = "snap-btn";
+snapBtn.textContent = "Download last frame";
+snapBtn.style.cssText =
+  "display:none;font-family:monospace;font-size:12px;margin:4px 8px;" +
+  "padding:4px 10px;background:#1a1a2e;color:#f0a500;border:1px solid #f0a500;" +
+  "border-radius:4px;cursor:pointer;";
+snapBtn.onclick = () => {
+  if (!frameSnap.width) return;
+  const a = document.createElement("a");
+  a.href = frameSnap.toDataURL("image/png");
+  a.download = `frame-${Date.now()}.png`;
+  a.click();
+};
+let lastSnapMs = 0;
+const SNAP_INTERVAL_MS = 500;
+
 function captureFrame() {
   const vw = video.videoWidth;
   const vh = video.videoHeight;
@@ -218,9 +251,22 @@ function captureFrame() {
   }
   const ctx = grab.getContext("2d", { willReadFrequently: true })!;
   ctx.drawImage(video, 0, 0);
+
+  // DIAGNOSTIC: throttled preview — grab is still valid after getImageData().
+  const nowMs = performance.now();
+  if (nowMs - lastSnapMs >= SNAP_INTERVAL_MS) {
+    lastSnapMs = nowMs;
+    const snapW = Math.min(400, vw);
+    const snapH = Math.round((snapW / vw) * vh);
+    if (frameSnap.width !== snapW || frameSnap.height !== snapH) {
+      frameSnap.width = snapW;
+      frameSnap.height = snapH;
+    }
+    frameSnap.getContext("2d")!.drawImage(grab, 0, 0, snapW, snapH);
+  }
+
   const img = ctx.getImageData(0, 0, vw, vh);
   busy[slot] = true;
-  // Pass gridCells as maxSymbols so the worker searches for all cells.
   workers[slot]!.postMessage(
     { id: frameId++, buf: img.data.buffer, w: vw, h: vh, maxSymbols: gridCells },
     [img.data.buffer],
