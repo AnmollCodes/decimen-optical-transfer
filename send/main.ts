@@ -20,6 +20,17 @@
 //   receiver distinguish it from fountain-coded data frames.
 // - IV: 12 bytes prepended to the ciphertext blob; generated fresh per session.
 // - FNV hash and totalLen are over the encrypted blob (IV + ciphertext + tag).
+//
+// Phase 3 — multi-QR grid:
+// - A "grid density" setting controls how many QR codes are rendered per
+//   displayed frame (1, 4, 9, or 16 — i.e. 1×1, 2×2, 3×3, 4×4).
+// - Each grid cell carries a DIFFERENT fountain frame (different seq, different
+//   encoded block). The receiver's zxing worker decodes all cells in one pass
+//   using maxNumberOfSymbols = gridCells, feeding each into the same LTDecoder.
+// - The key QR is still rendered as a single separate QR (not part of the grid).
+// - Throughput scales by up to gridCells× per displayed frame — actual gain
+//   depends on whether the receiver's worker pool can decode them fast enough.
+//   This must be verified with a real device test, not assumed from grid math.
 
 import QRCode from "qrcode";
 import { gzipCompress } from "../shared/compress";
@@ -27,7 +38,13 @@ import { aesGcmEncrypt, exportKeyBytes, generateAesKey } from "../shared/crypto"
 import { LTEncoder } from "../shared/fountain";
 import { HEADER_LEN, PROTO_VERSION, fnv1a, packFrame, type FrameHeader } from "../shared/protocol";
 
-const MARGIN = 4; // quiet-zone modules
+const MARGIN = 4;    // quiet-zone modules per cell (QR spec minimum)
+// CELL_GAP: explicit white-pixel gap between adjacent cells in the grid,
+// SEPARATE from each cell's MARGIN. Adjacent cells' quiet zones are not
+// enough separation for zxing's finder-pattern detector — it needs physical
+// blank space between symbol boundaries. 8px at scale=1 (scales up with the
+// QR module scale, so at a typical scale=4 this becomes 32 display pixels).
+const CELL_GAP = 8;
 const LOOKAHEAD = 3;
 
 const canvas = document.getElementById("qr") as HTMLCanvasElement;
@@ -37,6 +54,8 @@ const cfgFps = document.getElementById("cfg-fps") as HTMLSelectElement;
 const cfgBytes = document.getElementById("cfg-bytes") as HTMLSelectElement;
 const cfgEcc = document.getElementById("cfg-ecc") as HTMLSelectElement;
 const cfgSize = document.getElementById("cfg-size") as HTMLInputElement;
+// Grid density control — added in Phase 3. Falls back to 1 if not found (for tests).
+const cfgGrid = document.getElementById("cfg-grid") as HTMLSelectElement | null;
 
 // Key-QR overlay — created dynamically so the HTML doesn't need modification.
 const keyStage = document.createElement("div");
@@ -53,6 +72,15 @@ canvas.parentElement!.insertAdjacentElement("beforebegin", keyStage);
 
 const payloadCache = new Map<string, Uint8Array>();
 let generation = 0; // bumped on every restart; stale loops see it and die
+
+// DIAGNOSTIC: large unmissable banner showing active grid mode.
+// Inserted once after the specs line; updated on every startStream().
+const gridBanner = document.createElement("div");
+gridBanner.id = "grid-banner";
+gridBanner.style.cssText =
+  "font-family:monospace;font-size:18px;font-weight:bold;text-align:center;" +
+  "padding:8px;margin:8px 0;border-radius:6px;border:3px solid;";
+specs.insertAdjacentElement("afterend", gridBanner);
 
 async function loadPayload(url: string): Promise<Uint8Array | null> {
   const hit = payloadCache.get(url);
@@ -74,7 +102,9 @@ async function renderKeyQr(text: string): Promise<void> {
 }
 
 async function main() {
-  for (const el of [cfgPayload, cfgFps, cfgBytes, cfgEcc, cfgSize]) {
+  const controls = [cfgPayload, cfgFps, cfgBytes, cfgEcc, cfgSize];
+  if (cfgGrid) controls.push(cfgGrid);
+  for (const el of controls) {
     el.addEventListener("change", () => void startStream());
   }
   await startStream();
@@ -98,11 +128,28 @@ async function startStream() {
   const frameBytes = Number(cfgBytes.value);
   const ecc = cfgEcc.value as "L" | "M" | "Q" | "H";
   const displayPx = Number(cfgSize.value);
+  const gridCells = cfgGrid ? Number(cfgGrid.value) : 1;
+  const gridCols = Math.round(Math.sqrt(gridCells));
+
+  // DIAGNOSTIC: update banner immediately so it's visible before crypto runs.
+  if (gridCells > 1) {
+    gridBanner.textContent = `GRID ACTIVE: ${gridCols}×${gridCols} = ${gridCells} CELLS/FRAME`;
+    gridBanner.style.color = "#4ecca3";
+    gridBanner.style.borderColor = "#4ecca3";
+    gridBanner.style.background = "#0d2b22";
+  } else {
+    gridBanner.textContent = `SINGLE QR (1×1) — grid OFF`;
+    gridBanner.style.color = "#888";
+    gridBanner.style.borderColor = "#555";
+    gridBanner.style.background = "#1a1a1a";
+  }
+  console.log(`[SENDER] startStream: gridCells=${gridCells} gridCols=${gridCols} cfgGrid.value=${cfgGrid?.value ?? "(no element)"}`);
 
   // Step 1: Compress.
   const compressed = await gzipCompress(rawPayload);
 
   // Step 2: Generate session key and render the key QR for the receiver to scan.
+  // The key QR is always a single QR code — it is NOT part of the grid.
   const sessionKey = await generateAesKey();
   const keyBytes = await exportKeyBytes(sessionKey);
   const keyHex = Array.from(keyBytes).map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -110,68 +157,75 @@ async function startStream() {
   await renderKeyQr(`K:${keyHex}`);
 
   // Step 3: Encrypt (compress → encrypt → fountain).
-  // The fountain layer transports the encrypted blob; FNV and totalLen cover it.
   const payload = await aesGcmEncrypt(sessionKey, compressed);
 
-  if (gen !== generation) return; // superseded while encrypting
+  if (gen !== generation) return;
 
   const sessionId = (Math.floor(Math.random() * 0xffff) + 1) & 0xffff;
   const blockLen = frameBytes - HEADER_LEN;
   const encoder = new LTEncoder(payload, blockLen, sessionId);
-  const header: FrameHeader = {
+  const baseHeader: FrameHeader = {
     version: PROTO_VERSION,
     sessionId,
     seq: 0,
     k: encoder.k,
     blockLen,
-    totalLen: payload.length,     // encrypted blob length (IV + ciphertext + tag)
-    payloadFnv: fnv1a(payload),   // FNV of encrypted blob
+    totalLen: payload.length,
+    payloadFnv: fnv1a(payload),
   };
 
-  let version: number | undefined; // locked after the first frame
-  let modules = 0;
-  let scale = 1;
+  let qrVersion: number | undefined; // locked after the first QR is generated
+  let cellModules = 0;               // module count per cell (including margin)
   const staging = document.createElement("canvas");
   const queue: ImageData[] = [];
   let nextSeq = 0;
 
+  /** Size the output canvas to fit a gridCols×gridCols grid of cells with
+   * CELL_GAP white pixels of separation between adjacent cells (in addition
+   * to each cell's own MARGIN quiet zone). Returns the computed values so
+   * makeGridFrame can use them without re-computing.
+   */
+  let _cellPx = 0; // set once by sizeCanvas, read by makeGridFrame
+  let _gapPx = 0;
   const sizeCanvas = () => {
     const dpr = window.devicePixelRatio || 1;
-    const total = modules + 2 * MARGIN;
-    const cssBudget = Math.min(0.9 * Math.min(window.innerWidth, window.innerHeight), displayPx);
-    scale = Math.max(1, Math.floor((cssBudget * dpr) / total));
-    staging.width = total;
-    staging.height = total;
-    canvas.width = total * scale;
-    canvas.height = total * scale;
-    canvas.style.width = `${(total * scale) / dpr}px`;
-    canvas.style.height = `${(total * scale) / dpr}px`;
+    const cellTotal = cellModules;
+    const budget = Math.min(0.9 * Math.min(window.innerWidth, window.innerHeight), displayPx);
+    // scale: how many physical pixels per QR module
+    // Budget must fit gridCols cells + (gridCols-1) gaps.
+    // We solve for scale first (ignore gaps for now), then derive gap in same units.
+    const scale = Math.max(1, Math.floor((budget * dpr) / (cellTotal * gridCols + CELL_GAP * (gridCols - 1))));
+    _cellPx = cellTotal * scale;
+    // CELL_GAP is in screen-pixel units at scale=1; multiply by scale so the
+    // gap is proportionally the same physical size regardless of display scale.
+    _gapPx = CELL_GAP * scale;
+    const gridPx = _cellPx * gridCols + _gapPx * (gridCols - 1);
+    staging.width = gridPx;
+    staging.height = gridPx;
+    canvas.width = gridPx;
+    canvas.height = gridPx;
+    canvas.style.width = `${gridPx / dpr}px`;
+    canvas.style.height = `${gridPx / dpr}px`;
   };
 
-  const makeFrame = (): ImageData => {
-    const bytes = packFrame({ ...header, seq: nextSeq }, encoder.encode(nextSeq));
-    nextSeq++;
+  /**
+   * Render one QR code cell for fountain frame at seq `s` into ImageData.
+   * Returns the ImageData for the cell AND the module size (for first-time sizing).
+   */
+  const makeCell = (s: number): { img: ImageData; modules: number } => {
+    const bytes = packFrame({ ...baseHeader, seq: s }, encoder.encode(s));
     const qr = QRCode.create([{ data: bytes, mode: "byte" } as unknown as QRCode.QRCodeSegment], {
       errorCorrectionLevel: ecc,
-      version,
+      version: qrVersion,
       maskPattern: 4,
     });
-    if (version === undefined) {
-      version = qr.version;
-      modules = qr.modules.size;
-      sizeCanvas();
-      specs.textContent =
-        `${txFps} FPS · ${frameBytes} bytes per frame · V${version} · ECC ${ecc} · ` +
-        `${Math.round(rawPayload.length / 1024)} KB raw → ` +
-        `${Math.round(compressed.length / 1024)} KB compressed → ` +
-        `${Math.round(payload.length / 1024)} KB encrypted · K=${encoder.k}`;
-    }
+    qrVersion = qr.version;
     const size = qr.modules.size;
-    const data = qr.modules.data;
     const total = size + 2 * MARGIN;
     const img = new ImageData(total, total);
     const px = new Uint32Array(img.data.buffer);
     px.fill(0xffffffff);
+    const data = qr.modules.data;
     for (let y = 0; y < size; y++) {
       const row = (y + MARGIN) * total + MARGIN;
       const src = y * size;
@@ -179,15 +233,57 @@ async function startStream() {
         if (data[src + x]) px[row + x] = 0xff000000;
       }
     }
-    return img;
+    return { img, modules: total };
+  };
+
+  /**
+   * Build one grid ImageData: gridCols×gridCols cells, each a different fountain frame.
+   * Advances nextSeq by gridCells.
+   */
+  const makeGridFrame = (): ImageData => {
+    const cells: ImageData[] = [];
+    for (let i = 0; i < gridCells; i++) {
+      const { img, modules } = makeCell(nextSeq++);
+      if (cellModules === 0) {
+        // First cell ever: lock cell size and resize the output canvas.
+        cellModules = modules;
+        sizeCanvas();
+        specs.textContent =
+          `${txFps} FPS · ${frameBytes} B/frame · V${qrVersion!} · ECC ${ecc} · ` +
+          `grid ${gridCols}×${gridCols} (${gridCells} cells/frame, gap=${CELL_GAP}px) · ` +
+          `${Math.round(rawPayload.length / 1024)} KB raw → ` +
+          `${Math.round(compressed.length / 1024)} KB compressed → ` +
+          `${Math.round(payload.length / 1024)} KB encrypted · K=${encoder.k}`;
+      }
+      cells.push(img);
+    }
+
+    // Composite cells into the grid with CELL_GAP white separation between them.
+    // Each cell is placed at: x = col * (cellPx + gapPx), y = row * (cellPx + gapPx).
+    // The staging canvas is pre-filled white, so gaps are automatically white space.
+    const ctx2d = staging.getContext("2d")!;
+    ctx2d.fillStyle = "#fff";
+    ctx2d.fillRect(0, 0, staging.width, staging.height);
+    for (let i = 0; i < cells.length; i++) {
+      const col = i % gridCols;
+      const row = Math.floor(i / gridCols);
+      const x = col * (_cellPx + _gapPx);
+      const y = row * (_cellPx + _gapPx);
+      // Draw via temporary canvas (putImageData doesn't support scaling).
+      const tmp = document.createElement("canvas");
+      tmp.width = cells[i]!.width;
+      tmp.height = cells[i]!.height;
+      tmp.getContext("2d")!.putImageData(cells[i]!, 0, 0);
+      ctx2d.drawImage(tmp, x, y, _cellPx, _cellPx);
+    }
+    return ctx2d.getImageData(0, 0, staging.width, staging.height);
   };
 
   const pump = () => {
-    if (gen !== generation) return; // superseded by a settings change
+    if (gen !== generation) return;
     try {
-      while (queue.length < LOOKAHEAD) queue.push(makeFrame());
+      while (queue.length < LOOKAHEAD) queue.push(makeGridFrame());
     } catch (err) {
-      // e.g. frame bytes over capacity for the chosen ECC level
       specs.textContent = `✗ ${err instanceof Error ? err.message : String(err)}`;
       return;
     }
@@ -206,12 +302,9 @@ async function startStream() {
       nextAt = now + interval;
       return;
     }
-    staging.getContext("2d")!.putImageData(img, 0, 0);
-    const ctx = canvas.getContext("2d")!;
-    ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(staging, 0, 0, canvas.width, canvas.height);
+    canvas.getContext("2d")!.putImageData(img, 0, 0);
     nextAt += interval;
-    if (now - nextAt > 3 * interval) nextAt = now + interval; // fell behind — don't burst
+    if (now - nextAt > 3 * interval) nextAt = now + interval;
   };
   requestAnimationFrame(tick);
 }
