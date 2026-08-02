@@ -47,12 +47,15 @@ ctx.onmessage = async (e: MessageEvent) => {
       maxNumberOfSymbols: maxSymbols,
     });
     const cellDecodeMs = Date.now() - t0;
+    // DIAGNOSTIC: track raw find count vs. valid-filter count separately
+    const rawCount = rawResults.length;          // how many symbols zxing located
     const results = rawResults
       .filter((x) => x.isValid && x.bytes.length > 0)
       .map((x) => x.bytes);
-    ctx.postMessage({ id, results, cellDecodeMs });
+    const validCount = results.length;           // how many passed isValid+bytes check
+    ctx.postMessage({ id, results, cellDecodeMs, rawCount, validCount });
   } catch {
-    ctx.postMessage({ id, results: [], cellDecodeMs: Date.now() - t0 });
+    ctx.postMessage({ id, results: [], cellDecodeMs: Date.now() - t0, rawCount: 0, validCount: 0 });
   }
 };
 

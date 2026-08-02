@@ -71,19 +71,25 @@ let captureGen = 0;
 let done = false;
 
 // Grid density: how many QR cells the sender renders per display frame.
-// Must match the sender setting. Updated on each start().
 let gridCells = 1;
 
-// Session key promise — set ONCE, synchronously, by the first key-frame call.
+// Session key promise
 let sessionKeyPromise: Promise<CryptoKey> | null = null;
 
 const workers: Worker[] = [];
 const busy: boolean[] = [];
 const captureTimes: number[] = [];
 const decodeTimes: number[] = [];
-// Tracks individual cell decode completions (one per successfully decoded QR
-// code) for cells/sec telemetry. Updated in the worker message handler.
 const cellDecodeTimes: number[] = [];
+
+// DIAGNOSTIC accumulators — rolling 2-second window
+// rawFrames: count of worker responses (each = one camera frame processed)
+// rawTotalSymbols: sum of rawCount across those frames (how many zxing found)
+// validTotalSymbols: sum of validCount (how many passed isValid filter)
+let diagWindowStart = 0;
+let diagRawFrames = 0;
+let diagRawSymbols = 0;
+let diagValidSymbols = 0;
 
 startBtn.onclick = () => void start();
 
@@ -106,6 +112,8 @@ async function start() {
   preview.style.display = "block";
   metricsEl.style.display = "grid";
   keyBanner.style.display = "block";
+  const mDiagEl = document.getElementById("m-diag");
+  if (mDiagEl) mDiagEl.style.display = "block";
   const base: MediaTrackConstraints = {
     facingMode: "environment",
     width: { ideal: captureWidth },
@@ -135,17 +143,30 @@ async function start() {
     const w = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
     const slot = i;
     w.onmessage = (e: MessageEvent) => {
-      const { id, results, cellDecodeMs } = e.data as {
+      const { id, results, cellDecodeMs, rawCount, validCount } = e.data as {
         id: number;
         results: Uint8Array[];
         cellDecodeMs: number;
+        rawCount: number;    // DIAGNOSTIC: total symbols zxing found in this frame
+        validCount: number;  // DIAGNOSTIC: symbols that passed isValid+bytes filter
       };
       if (id === -1) return; // warm-up
       busy[slot] = false;
-      void cellDecodeMs; // used for future per-cell timing telemetry (captured but not displayed yet)
+
+      // DIAGNOSTIC: accumulate rolling window counts
       const now = performance.now();
+      if (now - diagWindowStart > 2000) {
+        diagWindowStart = now;
+        diagRawFrames = 0;
+        diagRawSymbols = 0;
+        diagValidSymbols = 0;
+      }
+      diagRawFrames++;
+      diagRawSymbols += rawCount;
+      diagValidSymbols += validCount;
+
+      void cellDecodeMs;
       for (const bytes of results) {
-        // Record a decode-time entry for each successfully decoded cell.
         decodeTimes.push(now);
         cellDecodeTimes.push(now);
         void onDecoded(bytes);
@@ -154,6 +175,7 @@ async function start() {
     workers.push(w);
     busy.push(false);
   }
+  diagWindowStart = performance.now();
 
   captureGen++;
   scheduleFrame(captureGen);
@@ -331,9 +353,25 @@ function updateStats() {
   prune(cellDecodeTimes);
   metric("m-cap").textContent = (captureTimes.length / 2).toFixed(0);
   metric("m-dec").textContent = (decodeTimes.length / 2).toFixed(1);
-  // cells/sec: how many individual QR cells were successfully decoded in last 2s
   const mCells = document.getElementById("m-cells");
   if (mCells) mCells.textContent = (cellDecodeTimes.length / 2).toFixed(1);
+
+  // DIAGNOSTIC: show raw-found/frame and valid/frame in stats text
+  // rawPF = avg symbols zxing located per camera frame processed
+  // validPF = avg symbols that passed isValid filter (= cells actually fed to decoder)
+  // If rawPF ≈ validPF ≈ gridCells → multi-symbol detection working
+  // If rawPF < gridCells → zxing not finding all symbols (layout/margin issue)
+  // If rawPF > validPF → zxing finding but flagging invalid (decode error issue)
+  const mDiag = document.getElementById("m-diag");
+  if (mDiag && diagRawFrames > 0) {
+    const rawPF = (diagRawSymbols / diagRawFrames).toFixed(2);
+    const validPF = (diagValidSymbols / diagRawFrames).toFixed(2);
+    mDiag.textContent =
+      `[DIAG] gridCells=${gridCells} maxSymbols sent=✓ ` +
+      `raw/frame=${rawPF} valid/frame=${validPF} ` +
+      `frames=${diagRawFrames}`;
+  }
+
   if (!decoder) return;
   const elapsed = (now - startTs) / 1000;
   const kbs = (decoder.framesNew * decoder.blockLen) / OVERHEAD_EST / 1024 / Math.max(0.1, elapsed);
