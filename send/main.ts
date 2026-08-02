@@ -38,7 +38,13 @@ import { aesGcmEncrypt, exportKeyBytes, generateAesKey } from "../shared/crypto"
 import { LTEncoder } from "../shared/fountain";
 import { HEADER_LEN, PROTO_VERSION, fnv1a, packFrame, type FrameHeader } from "../shared/protocol";
 
-const MARGIN = 4; // quiet-zone modules
+const MARGIN = 4;    // quiet-zone modules per cell (QR spec minimum)
+// CELL_GAP: explicit white-pixel gap between adjacent cells in the grid,
+// SEPARATE from each cell's MARGIN. Adjacent cells' quiet zones are not
+// enough separation for zxing's finder-pattern detector — it needs physical
+// blank space between symbol boundaries. 8px at scale=1 (scales up with the
+// QR module scale, so at a typical scale=4 this becomes 32 display pixels).
+const CELL_GAP = 8;
 const LOOKAHEAD = 3;
 
 const canvas = document.getElementById("qr") as HTMLCanvasElement;
@@ -153,15 +159,26 @@ async function startStream() {
   const queue: ImageData[] = [];
   let nextSeq = 0;
 
-  /** Measure cell size from a test QR and size the output canvas for gridCols×gridCols grid. */
+  /** Size the output canvas to fit a gridCols×gridCols grid of cells with
+   * CELL_GAP white pixels of separation between adjacent cells (in addition
+   * to each cell's own MARGIN quiet zone). Returns the computed values so
+   * makeGridFrame can use them without re-computing.
+   */
+  let _cellPx = 0; // set once by sizeCanvas, read by makeGridFrame
+  let _gapPx = 0;
   const sizeCanvas = () => {
     const dpr = window.devicePixelRatio || 1;
-    const cellTotal = cellModules; // modules including margin, already set
+    const cellTotal = cellModules;
     const budget = Math.min(0.9 * Math.min(window.innerWidth, window.innerHeight), displayPx);
-    // scale: pixels per QR module
-    const scale = Math.max(1, Math.floor((budget * dpr) / (cellTotal * gridCols)));
-    const cellPx = cellTotal * scale;
-    const gridPx = cellPx * gridCols;
+    // scale: how many physical pixels per QR module
+    // Budget must fit gridCols cells + (gridCols-1) gaps.
+    // We solve for scale first (ignore gaps for now), then derive gap in same units.
+    const scale = Math.max(1, Math.floor((budget * dpr) / (cellTotal * gridCols + CELL_GAP * (gridCols - 1))));
+    _cellPx = cellTotal * scale;
+    // CELL_GAP is in screen-pixel units at scale=1; multiply by scale so the
+    // gap is proportionally the same physical size regardless of display scale.
+    _gapPx = CELL_GAP * scale;
+    const gridPx = _cellPx * gridCols + _gapPx * (gridCols - 1);
     staging.width = gridPx;
     staging.height = gridPx;
     canvas.width = gridPx;
@@ -212,7 +229,7 @@ async function startStream() {
         sizeCanvas();
         specs.textContent =
           `${txFps} FPS · ${frameBytes} B/frame · V${qrVersion!} · ECC ${ecc} · ` +
-          `grid ${gridCols}×${gridCols} (${gridCells} cells/frame) · ` +
+          `grid ${gridCols}×${gridCols} (${gridCells} cells/frame, gap=${CELL_GAP}px) · ` +
           `${Math.round(rawPayload.length / 1024)} KB raw → ` +
           `${Math.round(compressed.length / 1024)} KB compressed → ` +
           `${Math.round(payload.length / 1024)} KB encrypted · K=${encoder.k}`;
@@ -220,20 +237,23 @@ async function startStream() {
       cells.push(img);
     }
 
-    // Composite cells into the grid.
+    // Composite cells into the grid with CELL_GAP white separation between them.
+    // Each cell is placed at: x = col * (cellPx + gapPx), y = row * (cellPx + gapPx).
+    // The staging canvas is pre-filled white, so gaps are automatically white space.
     const ctx2d = staging.getContext("2d")!;
     ctx2d.fillStyle = "#fff";
     ctx2d.fillRect(0, 0, staging.width, staging.height);
-    const cellPx = staging.width / gridCols;
     for (let i = 0; i < cells.length; i++) {
       const col = i % gridCols;
       const row = Math.floor(i / gridCols);
-      // Draw each cell ImageData via a temporary canvas to avoid putImageData clipping.
+      const x = col * (_cellPx + _gapPx);
+      const y = row * (_cellPx + _gapPx);
+      // Draw via temporary canvas (putImageData doesn't support scaling).
       const tmp = document.createElement("canvas");
       tmp.width = cells[i]!.width;
       tmp.height = cells[i]!.height;
       tmp.getContext("2d")!.putImageData(cells[i]!, 0, 0);
-      ctx2d.drawImage(tmp, col * cellPx, row * cellPx, cellPx, cellPx);
+      ctx2d.drawImage(tmp, x, y, _cellPx, _cellPx);
     }
     return ctx2d.getImageData(0, 0, staging.width, staging.height);
   };
