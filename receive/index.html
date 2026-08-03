@@ -54,6 +54,15 @@
         at a true 60 fps; the fps request is demanded with `exact` first
         because `ideal: 60` silently delivers 30.
       </div>
+      <div style="padding-top:10px;border-top:1px solid #333;margin-top:8px;">
+        <button
+          id="btn-clear-sessions"
+          style="font-family:monospace;font-size:12px;padding:5px 12px;
+                 background:#1a1a2e;color:#888;border:1px solid #555;
+                 border-radius:4px;cursor:pointer;"
+        >Clear saved session</button>
+        <span style="font-size:11px;color:#555;margin-left:8px;">removes any interrupted transfer from storage</span>
+      </div>
     </details>
     <button id="start">Start camera</button>
     <div class="metrics" id="metrics" style="display: none">
