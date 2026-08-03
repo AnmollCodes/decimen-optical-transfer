@@ -32,7 +32,21 @@
 //   depends on whether the receiver's worker pool can decode them fast enough.
 //   This must be verified with a real device test, not assumed from grid math.
 
+// Phase 4 — arbitrary file support:
+// - A <input type="file" multiple> lets the user select any file(s).
+// - Multiple files are bundled into a single DCMN container (shared/bundle.ts)
+//   before the compress → encrypt → fountain pipeline.
+// - The bundle manifest carries filename + MIME type inside the encrypted
+//   payload (not in the frame header), so metadata is protected by AES-GCM.
+// - Existing test-image presets are preserved as quick-start options.
+// - Maximum file size is bounded by k (u16 ≤ 65,535 blocks):
+//     at default blockLen=1445 B → max ≈ 90 MB raw input
+//     at max blockLen=2933 B   → max ≈ 183 MB raw input
+//   (totalLen is u32 = 4 GB, never the binding constraint.)
+//   The UI validates and warns before attempting to send an oversized bundle.
+
 import QRCode from "qrcode";
+import { bundleFiles } from "../shared/bundle";
 import { gzipCompress } from "../shared/compress";
 import { aesGcmEncrypt, exportKeyBytes, generateAesKey } from "../shared/crypto";
 import { LTEncoder } from "../shared/fountain";
@@ -56,6 +70,11 @@ const cfgEcc = document.getElementById("cfg-ecc") as HTMLSelectElement;
 const cfgSize = document.getElementById("cfg-size") as HTMLInputElement;
 // Grid density control — added in Phase 3. Falls back to 1 if not found (for tests).
 const cfgGrid = document.getElementById("cfg-grid") as HTMLSelectElement | null;
+// Phase 4: file picker alongside the existing preset dropdown.
+const cfgFileInput = document.getElementById("cfg-file") as HTMLInputElement | null;
+
+// State: files selected via the picker. When non-null, overrides cfgPayload URL.
+let selectedFiles: File[] | null = null;
 
 // Key-QR overlay — created dynamically so the HTML doesn't need modification.
 const keyStage = document.createElement("div");
@@ -107,6 +126,23 @@ async function main() {
   for (const el of controls) {
     el.addEventListener("change", () => void startStream());
   }
+  // Phase 4: file picker — selecting files triggers a stream restart.
+  if (cfgFileInput) {
+    cfgFileInput.addEventListener("change", () => {
+      const files = cfgFileInput.files ? Array.from(cfgFileInput.files) : null;
+      selectedFiles = files && files.length > 0 ? files : null;
+      // Update the filename display
+      const namesEl = document.getElementById("cfg-file-names");
+      if (namesEl) {
+        if (selectedFiles && selectedFiles.length > 0) {
+          namesEl.textContent = selectedFiles.map((f) => `${f.name} (${(f.size / 1024).toFixed(0)} KB)`).join(", ");
+        } else {
+          namesEl.textContent = "";
+        }
+      }
+      void startStream();
+    });
+  }
   await startStream();
   try {
     await (navigator as Navigator & { wakeLock?: { request(t: "screen"): Promise<unknown> } })
@@ -118,14 +154,56 @@ async function main() {
 
 async function startStream() {
   const gen = ++generation;
-  const rawPayload = await loadPayload(cfgPayload.value);
-  if (!rawPayload) {
-    specs.textContent = `✗ couldn't load ${cfgPayload.value}`;
-    return;
-  }
-  if (gen !== generation) return; // superseded while fetching
-  const txFps = Number(cfgFps.value);
   const frameBytes = Number(cfgBytes.value);
+  const blockLen = frameBytes - HEADER_LEN;
+
+  // --- Phase 4: resolve raw payload from file picker OR preset URL ---
+  let rawPayload: Uint8Array;
+  if (selectedFiles && selectedFiles.length > 0) {
+    // Validate size before any async work: check k won't overflow u16 (65535).
+    // We must compute on the COMPRESSED size (unknown until we compress), but
+    // we can check the raw bundle size as a conservative upper bound — gzip
+    // always produces output ≥ 1 byte, so if raw/blockLen > 65535 we warn.
+    // The real check happens again after compression below.
+    let totalRawBytes = 0;
+    for (const f of selectedFiles) totalRawBytes += f.size;
+    const kEstimate = Math.ceil(totalRawBytes / blockLen);
+    if (kEstimate > 65535) {
+      specs.textContent =
+        `✗ Files too large: ~${Math.round(totalRawBytes / 1024 / 1024)} MB uncompressed, ` +
+        `estimated ${kEstimate} blocks — maximum is 65,535 blocks ` +
+        `(≈${Math.round(65535 * blockLen / 1024 / 1024)} MB at ${frameBytes} B/frame). ` +
+        `Select fewer or smaller files.`;
+      return;
+    }
+    // Read all files and bundle them.
+    const entries = await Promise.all(
+      selectedFiles.map(async (f) => ({
+        name: f.name,
+        mime: f.type || "application/octet-stream",
+        data: new Uint8Array(await f.arrayBuffer()),
+      })),
+    );
+    rawPayload = bundleFiles(entries);
+  } else {
+    // Preset URL path (original behavior).
+    const loaded = await loadPayload(cfgPayload.value);
+    if (!loaded) {
+      specs.textContent = `✗ couldn't load ${cfgPayload.value}`;
+      return;
+    }
+    // Wrap preset in a bundle too, so the receiver always speaks the same format.
+    // Use the URL basename as the filename and guess image/png for the presets.
+    const url = cfgPayload.value;
+    const name = url.split("/").pop() ?? "file.bin";
+    const mime = name.endsWith(".png") ? "image/png" :
+                 name.endsWith(".jpg") || name.endsWith(".jpeg") ? "image/jpeg" :
+                 "application/octet-stream";
+    rawPayload = bundleFiles([{ name, mime, data: loaded }]);
+  }
+
+  if (gen !== generation) return; // superseded while reading files
+  const txFps = Number(cfgFps.value);
   const ecc = cfgEcc.value as "L" | "M" | "Q" | "H";
   const displayPx = Number(cfgSize.value);
   const gridCells = cfgGrid ? Number(cfgGrid.value) : 1;
@@ -148,6 +226,17 @@ async function startStream() {
   // Step 1: Compress.
   const compressed = await gzipCompress(rawPayload);
 
+  // Post-compression k check — compressed size is the real input to fountain.
+  const realK = Math.ceil(compressed.length / blockLen);
+  if (realK > 65535) {
+    specs.textContent =
+      `✗ Compressed payload too large: ${Math.round(compressed.length / 1024 / 1024)} MB ` +
+      `→ ${realK} blocks — maximum is 65,535. ` +
+      `Try a smaller file or a larger bytes/frame setting.`;
+    return;
+  }
+
+
   // Step 2: Generate session key and render the key QR for the receiver to scan.
   // The key QR is always a single QR code — it is NOT part of the grid.
   const sessionKey = await generateAesKey();
@@ -156,13 +245,12 @@ async function startStream() {
   keyStage.style.display = "block";
   await renderKeyQr(`K:${keyHex}`);
 
-  // Step 3: Encrypt (compress → encrypt → fountain).
+  // Step 3: Encrypt (bundle → compress → encrypt → fountain).
   const payload = await aesGcmEncrypt(sessionKey, compressed);
 
   if (gen !== generation) return;
 
   const sessionId = (Math.floor(Math.random() * 0xffff) + 1) & 0xffff;
-  const blockLen = frameBytes - HEADER_LEN;
   const encoder = new LTEncoder(payload, blockLen, sessionId);
   const baseHeader: FrameHeader = {
     version: PROTO_VERSION,

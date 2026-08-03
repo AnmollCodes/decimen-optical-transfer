@@ -15,9 +15,19 @@
         <label>
           payload
           <select id="cfg-payload">
-            <option value="../success.png" selected>512 KB image</option>
-            <option value="../success-2mb.png">2 MB image</option>
+            <option value="../success.png" selected>512 KB image (preset)</option>
+            <option value="../success-2mb.png">2 MB image (preset)</option>
           </select>
+        </label>
+        <label id="cfg-file-label" style="flex-direction:column;align-items:flex-start;gap:4px;">
+          or choose your own file(s)
+          <input
+            id="cfg-file"
+            type="file"
+            multiple
+            style="font-size:13px;color:#ccc;cursor:pointer;"
+          />
+          <span id="cfg-file-names" style="font-size:11px;color:#888;font-style:italic;"></span>
         </label>
         <label>
           tx fps
