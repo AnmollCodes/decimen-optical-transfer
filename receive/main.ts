@@ -31,11 +31,25 @@
 //   happens synchronously before the first `await`, so no two concurrent calls
 //   can both observe sessionKeyPromise===null and both start key import.
 
+// Phase 5 — resumable sessions:
+// - On page load, IndexedDB is checked for an in-progress session record.
+// - If found, a resume prompt is shown ("Resume X% / Start fresh").
+// - On resume: LTDecoder state (solved blocks + seen seqs) is restored from IDB,
+//   and the AES key is re-imported from the stored 32 raw bytes.
+// - During a live transfer, IDB is updated every ~2 s (throttled, not per-frame).
+// - On completion, the IDB record for the session is deleted.
+// - The AES key is stored in IDB alongside the decoder state. Security trade-off:
+//   IDB is local-device-only storage. The key is cleared on completion and on
+//   manual "Clear saved session". Acceptable for this local optical transfer use
+//   case — see session-store.ts for the full reasoning.
+
 import { gzipDecompress } from "../shared/compress";
 import { aesGcmDecrypt, importKeyBytes } from "../shared/crypto";
 import { LTDecoder } from "../shared/fountain";
 import { fnv1a, parseFrame } from "../shared/protocol";
 import { isBundled, unbundleFiles } from "../shared/bundle";
+import { saveSession, loadAllSessions, deleteSession, clearAllSessions, type SavedSession } from "./session-store";
+import { snapshotDecoder, restoreDecoder, snapshotProgress } from "../shared/decoder-state";
 
 const OVERHEAD_EST = 1.18; // expected frames ≈ K × this (robust-soliton ε)
 
@@ -71,11 +85,33 @@ let startTs = 0;
 let captureGen = 0;
 let done = false;
 
+// Phase 5: raw AES key bytes kept in memory so they can be persisted to IDB
+// alongside the decoder state. Cleared when the session completes.
+let currentKeyBytes: Uint8Array | null = null;
+
+// Phase 5: throttle IDB saves to once per ~2 seconds during frame acceptance.
+let lastSaveTs = 0;
+const SAVE_INTERVAL_MS = 2000;
+
+// Phase 5: flag set when we are resuming from a stored session
+// (suppresses the key-QR wait phase).
+let resumingFromStore = false;
+
 // Grid density: how many QR cells the sender renders per display frame.
 let gridCells = 1;
 
 // Session key promise
 let sessionKeyPromise: Promise<CryptoKey> | null = null;
+
+// Phase 5: resume prompt banner — shown on page load if a saved session exists.
+const resumeBanner = document.createElement("div");
+resumeBanner.id = "resume-banner";
+resumeBanner.style.cssText =
+  "display:none;padding:12px 14px;background:#1a1a2e;border:2px solid #a78bfa;" +
+  "border-radius:8px;color:#a78bfa;font-family:monospace;font-size:13px;" +
+  "margin-bottom:12px;";
+// Will be populated with content when a saved session is found.
+stats.parentElement!.insertAdjacentElement("afterbegin", resumeBanner);
 
 const workers: Worker[] = [];
 const busy: boolean[] = [];
@@ -93,6 +129,112 @@ let diagRawSymbols = 0;
 let diagValidSymbols = 0;
 
 startBtn.onclick = () => void start();
+
+// Phase 5: "Clear saved session" button in settings panel.
+const clearSessionsBtn = document.getElementById("btn-clear-sessions");
+if (clearSessionsBtn) {
+  clearSessionsBtn.onclick = () => {
+    void clearAllSessions().then(() => {
+      resumeBanner.style.display = "none";
+      clearSessionsBtn.textContent = "✓ Cleared";
+      setTimeout(() => { clearSessionsBtn.textContent = "Clear saved session"; }, 2000);
+    }).catch(() => {
+      clearSessionsBtn.textContent = "✗ Error clearing";
+    });
+  };
+}
+
+// Phase 5: check for saved sessions on page load.
+void checkForSavedSession();
+
+/**
+ * Phase 5: on page load, query IDB for any saved in-progress session.
+ * If found, show a resume prompt instead of / above the normal Start button.
+ */
+async function checkForSavedSession(): Promise<void> {
+  let sessions: SavedSession[];
+  try {
+    sessions = await loadAllSessions();
+  } catch {
+    return; // IDB unavailable (e.g. private mode on some browsers) — silently continue
+  }
+  if (sessions.length === 0) return;
+
+  // Take the most recently saved session (most likely the one the user cares about).
+  const saved = sessions.sort((a, b) => b.savedAt - a.savedAt)[0]!;
+  const pct = Math.round(snapshotProgress(saved) * 100);
+  const ageMin = Math.round((Date.now() - saved.savedAt) / 60000);
+  const ageStr = ageMin < 2 ? "just now" : `${ageMin} min ago`;
+  const sizeStr = `${Math.round(saved.totalLen / 1024)} KB`;
+
+  resumeBanner.innerHTML =
+    `<strong>↻ Interrupted transfer found</strong> — ${pct}% of ${sizeStr} received (${ageStr})<br>` +
+    `<div style="margin-top:8px;display:flex;gap:8px;">` +
+    `<button id="btn-resume" style="padding:6px 14px;background:#4c1d95;color:#a78bfa;` +
+      `border:1px solid #a78bfa;border-radius:5px;font-family:monospace;cursor:pointer;">` +
+      `Resume (${pct}% done)</button>` +
+    `<button id="btn-fresh" style="padding:6px 14px;background:#1a1a2e;color:#888;` +
+      `border:1px solid #555;border-radius:5px;font-family:monospace;cursor:pointer;">` +
+      `Start fresh</button>` +
+    `</div>`;
+  resumeBanner.style.display = "block";
+
+  document.getElementById("btn-resume")!.onclick = () => void resumeFromSaved(saved);
+  document.getElementById("btn-fresh")!.onclick = () => {
+    void deleteSession(saved.sessionId).catch(() => {/* ignore */});
+    resumeBanner.style.display = "none";
+  };
+}
+
+/**
+ * Phase 5: restore decoder + key from IDB and start the camera in "resume" mode.
+ */
+async function resumeFromSaved(saved: SavedSession): Promise<void> {
+  resumeBanner.style.display = "none";
+
+  // Re-import the persisted AES key.
+  let restoredKey: CryptoKey;
+  try {
+    restoredKey = await importKeyBytes(saved.keyBytes);
+  } catch (err: unknown) {
+    stats.textContent = `✗ resume: key import failed: ${err instanceof Error ? err.message : String(err)}`;
+    return;
+  }
+
+  // Restore the decoder from the snapshot.
+  const snap = {
+    k: saved.k,
+    blockLen: saved.blockLen,
+    sessionId: saved.sessionId,
+    totalLen: saved.totalLen,
+    solvedBuffers: saved.solvedBuffers,
+    solvedCount: saved.solvedCount,
+    framesNew: saved.framesNew,
+    seenSeqs: saved.seenSeqs,
+  };
+  decoder = restoreDecoder(snap);
+  sessionId = saved.sessionId;
+  currentKeyBytes = new Uint8Array(saved.keyBytes); // keep copy for ongoing saves
+
+  // Synthesize a resolved sessionKeyPromise so onDecoded skips key-QR phase.
+  sessionKeyPromise = Promise.resolve(restoredKey);
+  resumingFromStore = true;
+
+  // Update the key banner to reflect resumed state.
+  keyBanner.style.cssText =
+    "display:block;padding:10px;background:#1a1a2e;border:2px solid #a78bfa;" +
+    "border-radius:6px;color:#a78bfa;font-family:monospace;font-size:13px;" +
+    "text-align:center;margin-bottom:10px;";
+  keyBanner.textContent = `↻ Resuming from ${Math.round(snapshotProgress(snap) * 100)}% — point camera at the QR stream to continue.`;
+
+  // Show progress bar at the resumed position.
+  progressEl.style.display = "block";
+  bar.style.width = `${(snapshotProgress(snap) * 100).toFixed(1)}%`;
+  startTs = performance.now();
+
+  // Start the camera.
+  void start();
+}
 
 async function start() {
   if (!navigator.mediaDevices?.getUserMedia) {
@@ -147,7 +289,13 @@ async function start() {
   }
   video.srcObject = stream;
   await video.play().catch(() => undefined);
-  stats.textContent = `camera ${stream.getVideoTracks()[0]?.getSettings().width}×${stream.getVideoTracks()[0]?.getSettings().height}@${stream.getVideoTracks()[0]?.getSettings().frameRate} — scan key QR first…`;
+  // Show different status text depending on whether we're resuming or starting fresh.
+  if (resumingFromStore) {
+    resumingFromStore = false; // consumed — reset for any future fresh start
+    stats.textContent = `camera ${stream.getVideoTracks()[0]?.getSettings().width}×${stream.getVideoTracks()[0]?.getSettings().height}@${stream.getVideoTracks()[0]?.getSettings().frameRate} — resuming, scan QR stream…`;
+  } else {
+    stats.textContent = `camera ${stream.getVideoTracks()[0]?.getSettings().width}×${stream.getVideoTracks()[0]?.getSettings().height}@${stream.getVideoTracks()[0]?.getSettings().frameRate} — scan key QR first…`;
+  }
 
   for (let i = 0; i < workerCount; i++) {
     const w = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
@@ -297,6 +445,10 @@ function tryStartKeyImport(bytes: Uint8Array): Promise<CryptoKey> | null {
   // importKeyBytes returns a Promise — we return it without awaiting.
   // The caller stores this Promise synchronously, closing the race window.
   return importKeyBytes(keyBytes).then((key) => {
+    // Phase 5: capture raw key bytes for IDB persistence.
+    // Done here (in the resolved callback, not at construction time) so
+    // currentKeyBytes is only set after the key is confirmed valid by SubtleCrypto.
+    currentKeyBytes = keyBytes;
     keyBanner.style.cssText =
       "display:block;padding:10px;background:#1a1a2e;border:2px solid #4ecca3;" +
       "border-radius:6px;color:#4ecca3;font-family:monospace;font-size:13px;" +
@@ -334,6 +486,12 @@ async function onDecoded(bytes: Uint8Array): Promise<void> {
   if (!parsed || done) return;
   const { header, block } = parsed;
   if (!decoder || sessionId !== header.sessionId) {
+    // Phase 5: sender restarted with a new sessionId — delete the stale IDB record
+    // so an accidental reload doesn't offer to resume the old (now-irrelevant) session.
+    if (sessionId !== 0 && sessionId !== header.sessionId) {
+      void deleteSession(sessionId).catch(() => {/* non-fatal */});
+    }
+    lastSaveTs = 0; // reset throttle so first frame of new session saves promptly
     decoder = new LTDecoder(header.k, header.blockLen, header.sessionId, header.totalLen);
     sessionId = header.sessionId;
     startTs = performance.now();
@@ -342,6 +500,28 @@ async function onDecoded(bytes: Uint8Array): Promise<void> {
   decoder.addFrame(header.seq, block);
   const progress = Math.min(0.99, decoder.framesNew / (decoder.k * OVERHEAD_EST));
   bar.style.width = `${(progress * 100).toFixed(1)}%`;
+
+  // Phase 5: throttled IDB save — at most once per SAVE_INTERVAL_MS.
+  // Also save when ≥90% complete (so a near-the-end reload still resumes well).
+  const now90 = performance.now();
+  const near90 = progress >= 0.9;
+  if (currentKeyBytes && (now90 - lastSaveTs >= SAVE_INTERVAL_MS || near90)) {
+    lastSaveTs = now90;
+    const snap = snapshotDecoder(decoder);
+    const record: SavedSession = {
+      sessionId: decoder.sessionId,
+      k: decoder.k,
+      blockLen: decoder.blockLen,
+      totalLen: decoder.totalLen,
+      keyBytes: currentKeyBytes,
+      solvedBuffers: snap.solvedBuffers,
+      solvedCount: snap.solvedCount,
+      framesNew: snap.framesNew,
+      seenSeqs: snap.seenSeqs,
+      savedAt: Date.now(),
+    };
+    void saveSession(record).catch(() => {/* IDB save failure is non-fatal */});
+  }
 
   if (decoder.isComplete) {
     // Guard against duplicate completion: multiple concurrent onDecoded calls
@@ -386,6 +566,9 @@ function finish(payload: Uint8Array, hashOk: boolean, seconds: number, totalLen:
   // but this guard catches any future code path that calls finish() directly.
   if (result.hasChildNodes()) return;
 
+  // Phase 5: clear the IDB record for this session — transfer complete.
+  void deleteSession(sessionId).catch(() => {/* non-fatal */});
+  currentKeyBytes = null;
   captureGen++;
   stream?.getTracks().forEach((t) => t.stop());
   preview.style.display = "none";
