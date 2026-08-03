@@ -26,6 +26,22 @@ export const HEADER_LEN = 20;
 const MAGIC0 = 0xd1;
 export const PROTO_VERSION = 0x02;
 
+// Upper bounds for frame header fields — defence against malformed/malicious QR streams.
+// A frame that passes these checks can be safely decoded without risking unbounded
+// memory allocation on the receiver.
+//
+// MAX_K: k is u16 (0–65,535). LTDecoder allocates solved[k] (Uint32Array or null
+//   per block) and solitonCdf(k) (Float64Array). With blockLen=2953 each solved block
+//   is ceil(2953/4)×4 = 2,956 bytes; 65,535 × 2,956 ≈ 187 MB worst-case — tolerable
+//   for a receiver on a real device. No separate cap on k is needed beyond the u16 wire
+//   max, since blockLen is independently capped.
+// MAX_BLOCK_LEN: QR V40 at error correction L holds 2,953 bytes maximum. A blockLen
+//   above this cannot have originated from a real QR code — reject it.
+// MAX_TOTAL_LEN: u32 wire max is ~4 GB. Cap at 500 MB to prevent downstream issues
+//   from a corrupted frame claiming an enormous payload before any real validation.
+export const MAX_BLOCK_LEN = 2953; // QR V40 ECC-L maximum payload bytes
+export const MAX_TOTAL_LEN = 500 * 1024 * 1024; // 500 MB ceiling
+
 // Accepted version bytes. A v2 receiver rejects v0/v1 frames; this is intentional
 // — a v0/v1 sender and v2 receiver are not protocol-compatible.
 const ACCEPTED_VERSIONS = new Set([PROTO_VERSION]);
@@ -73,6 +89,10 @@ export function parseFrame(
     payloadFnv: dv.getUint32(16, true),
   };
   if (header.k === 0 || header.blockLen === 0 || header.totalLen === 0) return null;
+  // Upper-bound checks: reject obviously malformed/malicious frames before
+  // the receiver allocates memory proportional to these values.
+  if (header.blockLen > MAX_BLOCK_LEN) return null;   // above QR V40 max capacity
+  if (header.totalLen > MAX_TOTAL_LEN) return null;   // above 500 MB ceiling
   if (bytes.length !== HEADER_LEN + header.blockLen) return null;
   return { header, block: bytes.subarray(HEADER_LEN) };
 }

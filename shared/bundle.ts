@@ -27,6 +27,12 @@
 
 const MAGIC = new Uint8Array([0x44, 0x43, 0x4d, 0x4e]); // "DCMN"
 
+// Manifest bounds — protect against malicious/corrupted bundles that claim
+// enormous counts or string lengths before the truncation check would catch them.
+const MAX_FILE_COUNT = 1024;  // more than any real multi-file transfer needs
+const MAX_NAME_LEN  = 4096;  // 4 KB filename is already absurd
+const MAX_MIME_LEN  = 256;   // MIME types are short by spec (e.g. "image/jpeg")
+
 export interface BundleEntry {
   name: string;
   mime: string;
@@ -99,6 +105,9 @@ export function unbundleFiles(buf: Uint8Array): BundleEntry[] | null {
 
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const fileCount = dv.getUint32(4, true);
+  if (fileCount > MAX_FILE_COUNT) {
+    throw new RangeError(`Bundle claims ${fileCount} files — exceeds maximum ${MAX_FILE_COUNT}`);
+  }
   let off = 8;
 
   const files: BundleEntry[] = [];
@@ -110,6 +119,13 @@ export function unbundleFiles(buf: Uint8Array): BundleEntry[] | null {
     off += 2;
     const fileSize = dv.getUint32(off, true);
     off += 4;
+    // Bounds-check field lengths before touching the byte ranges.
+    if (nameLen > MAX_NAME_LEN) {
+      throw new RangeError(`File ${i}: filename length ${nameLen} exceeds maximum ${MAX_NAME_LEN}`);
+    }
+    if (mimeLen > MAX_MIME_LEN) {
+      throw new RangeError(`File ${i}: MIME type length ${mimeLen} exceeds maximum ${MAX_MIME_LEN}`);
+    }
 
     if (off + nameLen + mimeLen + fileSize > buf.length) {
       throw new RangeError(`Bundle truncated at file ${i} body (need ${nameLen + mimeLen + fileSize} bytes at off=${off}, have ${buf.length - off})`);
