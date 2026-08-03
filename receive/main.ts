@@ -344,6 +344,16 @@ async function onDecoded(bytes: Uint8Array): Promise<void> {
   bar.style.width = `${(progress * 100).toFixed(1)}%`;
 
   if (decoder.isComplete) {
+    // Guard against duplicate completion: multiple concurrent onDecoded calls
+    // can all observe decoder.isComplete===true if they were already past the
+    // outer `if (!parsed || done)` check when the decoder completed.
+    //
+    // Fix: `if (done) return; done = true;` is a sync check-and-set — no await
+    // between them, so JS's single-threaded execution guarantees only the first
+    // call proceeds. Any subsequent call sees done===true and returns.
+    if (done) return;
+    done = true; // set synchronously before the first await below
+
     // assemble() returns the encrypted blob (IV + ciphertext + auth tag).
     const encryptedBlob = decoder.assemble()!;
     const seconds = (performance.now() - startTs) / 1000;
@@ -371,7 +381,11 @@ async function onDecoded(bytes: Uint8Array): Promise<void> {
 }
 
 function finish(payload: Uint8Array, hashOk: boolean, seconds: number, totalLen: number) {
-  done = true;
+  // Defense-in-depth guard: finish() must never render the UI more than once.
+  // The primary fix is in onDecoded (done set synchronously before any await),
+  // but this guard catches any future code path that calls finish() directly.
+  if (result.hasChildNodes()) return;
+
   captureGen++;
   stream?.getTracks().forEach((t) => t.stop());
   preview.style.display = "none";
