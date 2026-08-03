@@ -3,21 +3,656 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Optical Transfer — fountain-coded QR file transfer</title>
-    <link rel="stylesheet" href="./shared/style.css" />
+    <title>DECIMEN — Fountain QR File Transfer</title>
+    <meta name="description" content="Transfer files between devices using nothing but a screen and a camera. Fountain-coded animated QR codes, AES-256-GCM encryption, no network required." />
+    <style>
+      /* ── Design tokens ── same palette as shared/style.css ─────────── */
+      :root {
+        --bg:        #121009;
+        --bg2:       #1b1712;
+        --bg3:       #231f18;
+        --border:    #2e2718;
+        --amber:     #ffb257;
+        --amber-dim: #c4843a;
+        --teal:      #4ecca3;
+        --teal-dim:  #3aab85;
+        --muted:     #9a8f76;
+        --text:      #ede5d4;
+        --green:     #7dc98f;
+        --mono:      ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+
+      html { scroll-behavior: smooth; }
+
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font: 15px/1.6 var(--mono);
+        min-height: 100vh;
+      }
+
+      a { color: var(--amber); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+
+      /* ── Nav ────────────────────────────────────────────────────────── */
+      nav {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 14px 24px;
+        border-bottom: 1px solid var(--border);
+        background: var(--bg2);
+        position: sticky;
+        top: 0;
+        z-index: 10;
+      }
+      .nav-brand {
+        font-size: 13px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--amber);
+        font-weight: 700;
+      }
+      .nav-links {
+        display: flex;
+        gap: 18px;
+        list-style: none;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+      .nav-links a { color: var(--muted); }
+      .nav-links a:hover { color: var(--text); text-decoration: none; }
+
+      /* ── Hero ───────────────────────────────────────────────────────── */
+      .hero {
+        padding: 72px 24px 56px;
+        max-width: 820px;
+        margin: 0 auto;
+        text-align: center;
+      }
+      .hero-tag {
+        display: inline-block;
+        font-size: 11px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--teal);
+        border: 1px solid var(--teal);
+        border-radius: 2px;
+        padding: 3px 9px;
+        margin-bottom: 24px;
+      }
+      .hero h1 {
+        font-size: clamp(24px, 5vw, 42px);
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--amber);
+        line-height: 1.15;
+        margin-bottom: 12px;
+      }
+      .hero-sub {
+        font-size: clamp(13px, 2vw, 16px);
+        color: var(--muted);
+        max-width: 600px;
+        margin: 0 auto 36px;
+        line-height: 1.7;
+      }
+      .hero-actions {
+        display: flex;
+        gap: 14px;
+        justify-content: center;
+        flex-wrap: wrap;
+      }
+      .btn-primary {
+        display: inline-block;
+        background: var(--amber);
+        color: var(--bg);
+        font: 700 15px/1 var(--mono);
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        padding: 14px 36px;
+        border-radius: 0;
+        border: 2px solid var(--amber);
+        cursor: pointer;
+        transition: background 0.15s, color 0.15s;
+      }
+      .btn-primary:hover {
+        background: var(--bg);
+        color: var(--amber);
+        text-decoration: none;
+      }
+      .btn-secondary {
+        display: inline-block;
+        background: transparent;
+        color: var(--teal);
+        font: 700 15px/1 var(--mono);
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        padding: 14px 36px;
+        border-radius: 0;
+        border: 2px solid var(--teal);
+        cursor: pointer;
+        transition: background 0.15s, color 0.15s;
+      }
+      .btn-secondary:hover {
+        background: var(--teal);
+        color: var(--bg);
+        text-decoration: none;
+      }
+
+      /* ── Stats bar ──────────────────────────────────────────────────── */
+      .stats-bar {
+        border-top: 1px solid var(--border);
+        border-bottom: 1px solid var(--border);
+        background: var(--bg2);
+        padding: 18px 24px;
+        display: flex;
+        justify-content: center;
+        gap: 40px;
+        flex-wrap: wrap;
+      }
+      .stat-item {
+        text-align: center;
+      }
+      .stat-value {
+        font-size: 24px;
+        font-weight: 700;
+        color: var(--amber);
+        display: block;
+        font-variant-numeric: tabular-nums;
+        letter-spacing: 0.04em;
+      }
+      .stat-label {
+        font-size: 11px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        display: block;
+      }
+
+      /* ── How it works ───────────────────────────────────────────────── */
+      .section {
+        max-width: 820px;
+        margin: 0 auto;
+        padding: 56px 24px;
+      }
+      .section-title {
+        font-size: 11px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin-bottom: 32px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .section-title::after {
+        content: "";
+        flex: 1;
+        height: 1px;
+        background: var(--border);
+      }
+
+      .steps {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+        gap: 1px;
+        background: var(--border);
+        border: 1px solid var(--border);
+      }
+      .step {
+        background: var(--bg2);
+        padding: 20px;
+      }
+      .step-num {
+        font-size: 11px;
+        color: var(--teal);
+        letter-spacing: 0.1em;
+        display: block;
+        margin-bottom: 8px;
+      }
+      .step-title {
+        font-size: 13px;
+        font-weight: 700;
+        color: var(--text);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        margin-bottom: 6px;
+      }
+      .step-body {
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+
+      /* ── Feature phases ─────────────────────────────────────────────── */
+      .phases {
+        border: 1px solid var(--border);
+      }
+      .phase {
+        display: grid;
+        grid-template-columns: 90px 1fr;
+        border-bottom: 1px solid var(--border);
+      }
+      .phase:last-child { border-bottom: none; }
+      .phase-num {
+        background: var(--bg3);
+        border-right: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 11px;
+        color: var(--muted);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        flex-direction: column;
+        gap: 4px;
+        padding: 14px 8px;
+      }
+      .phase-num-n {
+        font-size: 20px;
+        font-weight: 700;
+        color: var(--amber);
+      }
+      .phase-body {
+        padding: 16px 20px;
+      }
+      .phase-title {
+        font-size: 13px;
+        font-weight: 700;
+        color: var(--text);
+        text-transform: uppercase;
+        letter-spacing: 0.07em;
+        margin-bottom: 5px;
+      }
+      .phase-desc {
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.65;
+      }
+      .phase-tag {
+        display: inline-block;
+        font-size: 10px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        padding: 2px 7px;
+        border-radius: 2px;
+        margin-top: 7px;
+      }
+      .tag-amber { border: 1px solid var(--amber-dim); color: var(--amber); }
+      .tag-teal  { border: 1px solid var(--teal-dim);  color: var(--teal);  }
+      .tag-green { border: 1px solid #4a8a57;           color: var(--green); }
+      .tag-gray  { border: 1px solid var(--border);     color: var(--muted); }
+
+      /* ── Tech callout ───────────────────────────────────────────────── */
+      .callout {
+        border: 1px solid var(--border);
+        background: var(--bg2);
+        padding: 22px 24px;
+        font-size: 13px;
+        line-height: 1.7;
+        color: var(--muted);
+      }
+      .callout strong { color: var(--text); }
+      .callout code {
+        font: inherit;
+        color: var(--teal);
+        background: var(--bg3);
+        padding: 1px 5px;
+        border-radius: 2px;
+      }
+
+      /* ── Usage strip ────────────────────────────────────────────────── */
+      .usage-strip {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1px;
+        background: var(--border);
+        border: 1px solid var(--border);
+        margin-top: 32px;
+      }
+      .usage-card {
+        background: var(--bg2);
+        padding: 24px;
+      }
+      .usage-role {
+        font-size: 11px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        margin-bottom: 10px;
+      }
+      .usage-role.amber { color: var(--amber); }
+      .usage-role.teal  { color: var(--teal);  }
+      .usage-link {
+        display: inline-block;
+        margin-top: 12px;
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        padding: 10px 22px;
+        border: 2px solid;
+        transition: background 0.15s, color 0.15s;
+      }
+      .usage-link.amber {
+        color: var(--amber);
+        border-color: var(--amber);
+      }
+      .usage-link.amber:hover {
+        background: var(--amber);
+        color: var(--bg);
+        text-decoration: none;
+      }
+      .usage-link.teal {
+        color: var(--teal);
+        border-color: var(--teal);
+      }
+      .usage-link.teal:hover {
+        background: var(--teal);
+        color: var(--bg);
+        text-decoration: none;
+      }
+      .usage-steps {
+        list-style: none;
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.9;
+        counter-reset: step;
+      }
+      .usage-steps li::before {
+        counter-increment: step;
+        content: counter(step) ". ";
+        color: var(--amber);
+      }
+
+      /* ── Footer ─────────────────────────────────────────────────────── */
+      footer {
+        border-top: 1px solid var(--border);
+        background: var(--bg2);
+        padding: 22px 24px;
+        font-size: 12px;
+        color: var(--muted);
+        text-align: center;
+        line-height: 1.8;
+      }
+      footer a { color: var(--muted); }
+      footer a:hover { color: var(--text); }
+
+      /* ── Responsive ─────────────────────────────────────────────────── */
+      @media (max-width: 600px) {
+        .usage-strip { grid-template-columns: 1fr; }
+        .phase { grid-template-columns: 60px 1fr; }
+        .stats-bar { gap: 24px; }
+        .nav-links { display: none; }
+      }
+    </style>
   </head>
   <body>
-    <h1>DECIMEN <small>— Fountain QR File Transfer (PoC)</small></h1>
-    <p class="hint">
-      Send a file between two devices using nothing but a screen and a camera.
-      Open <a href="./send/">send</a> on the device with the file (a laptop is
-      ideal) and <a href="./receive/">receive</a> on a phone, then point the
-      phone's camera at the flickering code.
-    </p>
-    <p class="hint">
-      No network path between the devices is used — the payload travels as
-      light. Fountain coding means the receiver can drop any frames, in any
-      order, and still reconstruct the file.
-    </p>
+
+    <!-- ── Navigation ─────────────────────────────────────────────── -->
+    <nav>
+      <span class="nav-brand">DECIMEN</span>
+      <ul class="nav-links">
+        <li><a href="#how">How it works</a></li>
+        <li><a href="#phases">Features</a></li>
+        <li><a href="#use">Use it</a></li>
+        <li><a href="https://github.com/AnmollCodes/decimen-optical-transfer" target="_blank" rel="noopener">GitHub ↗</a></li>
+      </ul>
+    </nav>
+
+    <!-- ── Hero ───────────────────────────────────────────────────── -->
+    <section class="hero">
+      <span class="hero-tag">No network · No cable · No pairing</span>
+      <h1>File transfer<br>through the air —<br>as light</h1>
+      <p class="hero-sub">
+        DECIMEN sends files from one device to another using only a screen
+        and a camera. The payload travels as animated QR codes — fountain
+        coded, AES-256-GCM encrypted, compressed — with no Wi-Fi, Bluetooth,
+        USB or cloud account in the path.
+      </p>
+      <div class="hero-actions">
+        <a class="btn-primary" href="./send/">Open sender →</a>
+        <a class="btn-secondary" href="./receive/">Open receiver →</a>
+      </div>
+    </section>
+
+    <!-- ── Measured stats ─────────────────────────────────────────── -->
+    <div class="stats-bar">
+      <div class="stat-item">
+        <span class="stat-value">44 KB/s</span>
+        <span class="stat-label">peak throughput (2×2 grid)</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-value">~10×</span>
+        <span class="stat-label">gain over single QR baseline</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-value">AES-256</span>
+        <span class="stat-label">GCM authenticated encryption</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-value">125</span>
+        <span class="stat-label">tests, CI green</span>
+      </div>
+    </div>
+
+    <!-- ── How it works ───────────────────────────────────────────── -->
+    <section class="section" id="how">
+      <div class="section-title">How it works</div>
+      <div class="steps">
+        <div class="step">
+          <span class="step-num">01 / ENCODE</span>
+          <div class="step-title">Fountain coding</div>
+          <p class="step-body">
+            The file is sliced into blocks, then LT-encoded into a theoretically
+            infinite stream of distinct coded frames. The receiver can reconstruct
+            the original from any ~1.18× overhead of frames — in any order,
+            with any gaps.
+          </p>
+        </div>
+        <div class="step">
+          <span class="step-num">02 / SECURE</span>
+          <div class="step-title">Key QR + encryption</div>
+          <p class="step-body">
+            Before the data stream starts, the sender shows a key QR code
+            encoding a 32-byte AES-256-GCM session key. The receiver scans it once.
+            All data frames are encrypted; the auth tag catches any tampering or
+            bit-flip in transit.
+          </p>
+        </div>
+        <div class="step">
+          <span class="step-num">03 / TRANSMIT</span>
+          <div class="step-title">Animated QR grid</div>
+          <p class="step-body">
+            The sender renders up to a 4×4 grid of QR codes per screen frame —
+            each cell carries a different fountain frame. zxing-wasm decodes all
+            visible symbols from one camera capture in a single worker pass.
+          </p>
+        </div>
+        <div class="step">
+          <span class="step-num">04 / RECEIVE</span>
+          <div class="step-title">Decode + verify</div>
+          <p class="step-body">
+            Once the decoder has enough unique frames, LT peeling reconstructs
+            the payload. FNV-1a hash is verified over the encrypted blob, then
+            AES-GCM decrypts and the file downloads with the original filename.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Phase feature log ──────────────────────────────────────── -->
+    <section class="section" id="phases">
+      <div class="section-title">What was built — six phases</div>
+      <div class="phases">
+
+        <div class="phase">
+          <div class="phase-num"><span class="phase-num-n">0</span>Foundation</div>
+          <div class="phase-body">
+            <div class="phase-title">Fountain codec + raw QR stream</div>
+            <p class="phase-desc">
+              Core LT fountain encoder and decoder (<code style="font:inherit;color:#4ecca3;background:#231f18;padding:1px 4px;border-radius:2px;">splitmix32</code> PRNG,
+              robust-soliton degree distribution), frame packing with a 20-byte
+              self-describing header, and the sender/receiver UI shell.
+              Multi-page Vite build, TypeScript, ESLint, Vitest CI from day one.
+            </p>
+            <span class="phase-tag tag-gray">Protocol v0 · Raw payload</span>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="phase-num"><span class="phase-num-n">1</span>Compress</div>
+          <div class="phase-body">
+            <div class="phase-title">gzip compression via CompressionStreams</div>
+            <p class="phase-desc">
+              Payload is gzip-compressed before fountain-splitting using the
+              browser-native Compression Streams API. No dependencies added.
+              FNV-1a hash recorded over the compressed bytes so the receiver
+              can verify integrity before decryption.
+            </p>
+            <span class="phase-tag tag-gray">Protocol v1 · ~30-40% smaller on typical files</span>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="phase-num"><span class="phase-num-n">2</span>Encrypt</div>
+          <div class="phase-body">
+            <div class="phase-title">AES-256-GCM end-to-end encryption</div>
+            <p class="phase-desc">
+              A 32-byte AES-256-GCM session key is generated fresh per transfer,
+              encoded into a separate key QR code shown before the data stream,
+              and used to encrypt the entire compressed payload. The 12-byte IV
+              is random per encryption; the 16-byte auth tag travels with the
+              ciphertext. SubtleCrypto throughout — no third-party crypto library.
+            </p>
+            <span class="phase-tag tag-amber">Protocol v2 · AES-256-GCM · SubtleCrypto</span>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="phase-num"><span class="phase-num-n">3</span>Grid</div>
+          <div class="phase-body">
+            <div class="phase-title">Multi-QR grid — ~10× throughput gain</div>
+            <p class="phase-desc">
+              The sender renders a 1×1, 2×2, 3×3, or 4×4 grid of independent QR
+              codes per screen frame, each carrying a different fountain frame.
+              zxing-wasm's <code style="font:inherit;color:#4ecca3;background:#231f18;padding:1px 4px;border-radius:2px;">maxNumberOfSymbols</code> decodes all cells in a
+              single camera capture. Device-tested at 44 KB/s on 2×2, ~10× over
+              the single-QR baseline. The key QR remains a single code shown once.
+            </p>
+            <span class="phase-tag tag-teal">44 KB/s measured · Real device verified</span>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="phase-num"><span class="phase-num-n">4</span>Files</div>
+          <div class="phase-body">
+            <div class="phase-title">Arbitrary file support + multi-file bundles</div>
+            <p class="phase-desc">
+              A DCMN bundle format wraps one or more files (filename, MIME type,
+              content) inside the encrypted payload — metadata is protected by
+              AES-GCM along with the data. The receiver unbundles and offers typed
+              downloads for each file, with image preview for image/* files.
+              Sender UI now accepts any file via a standard file picker.
+            </p>
+            <span class="phase-tag tag-amber">Any file type · Multi-file · DCMN bundle format</span>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="phase-num"><span class="phase-num-n">5</span>Resume</div>
+          <div class="phase-body">
+            <div class="phase-title">Resumable sessions via IndexedDB</div>
+            <p class="phase-desc">
+              If the receiver page is reloaded mid-transfer (accidental navigation,
+              phone lock), it offers to resume from the last saved snapshot rather
+              than restarting. The LT decoder state (solved blocks + seen sequence
+              numbers) and AES key are persisted to IndexedDB, throttled to every
+              ~2 s. Device-tested: interrupted at 56% (272 KB of 484 KB), resumed,
+              completed correctly.
+            </p>
+            <span class="phase-tag tag-green">56% resume tested · IDB persistence · Key cleared on finish</span>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="phase-num"><span class="phase-num-n">6</span>Harden</div>
+          <div class="phase-body">
+            <div class="phase-title">Security hardening + QA pass</div>
+            <p class="phase-desc">
+              <code style="font:inherit;color:#4ecca3;background:#231f18;padding:1px 4px;border-radius:2px;">parseFrame</code> now enforces upper bounds:
+              <code style="font:inherit;color:#4ecca3;background:#231f18;padding:1px 4px;border-radius:2px;">blockLen ≤ 2953</code> (QR V40 physical max) and
+              <code style="font:inherit;color:#4ecca3;background:#231f18;padding:1px 4px;border-radius:2px;">totalLen ≤ 500 MB</code>. Bundle manifest bounds
+              prevent a malicious fileCount or oversized filename from spinning
+              before truncation checks fire. Full DOM XSS audit confirmed all
+              bundle-derived strings go through <code style="font:inherit;color:#4ecca3;background:#231f18;padding:1px 4px;border-radius:2px;">textContent</code>.
+              End-to-end pipeline integration test added covering every pure layer.
+            </p>
+            <span class="phase-tag tag-gray">125 tests · 0 vulnerabilities (npm audit)</span>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ── Technical callout ──────────────────────────────────────── -->
+    <section class="section" style="padding-top:0;">
+      <div class="callout">
+        <strong>Protocol v2 wire format.</strong>
+        Every QR code carries a 20-byte self-describing header:
+        <code>magic(1) · version(1) · sessionId(2) · seq(4) · k(2) · blockLen(2) · totalLen(4) · fnv(4)</code>,
+        followed by <code>blockLen</code> bytes of fountain-coded encrypted payload.
+        The receiver locks onto a new session on any frame — no handshake, no
+        pairing, no negotiation. <strong>Sender and receiver only need to agree on
+        grid density</strong> — set them both to the same value in Settings.
+      </div>
+    </section>
+
+    <!-- ── Use it section ─────────────────────────────────────────── -->
+    <section class="section" id="use" style="padding-top:0;">
+      <div class="section-title">How to use it</div>
+      <div class="usage-strip">
+        <div class="usage-card">
+          <div class="usage-role amber">Sender — laptop / desktop</div>
+          <ol class="usage-steps">
+            <li>Open <strong>Send</strong> below in Chrome or Firefox</li>
+            <li>Choose a file (or drag one in)</li>
+            <li>Set grid density to 2×2 for speed</li>
+            <li>Point your phone camera at the key QR first</li>
+            <li>Then point at the flickering data grid</li>
+            <li>Keep screen at max brightness</li>
+          </ol>
+          <a class="usage-link amber" href="./send/">Open sender →</a>
+        </div>
+        <div class="usage-card">
+          <div class="usage-role teal">Receiver — phone / tablet</div>
+          <ol class="usage-steps">
+            <li>Open <strong>Receive</strong> below on your phone</li>
+            <li>Match grid density to the sender's setting</li>
+            <li>Tap <em>Start camera</em></li>
+            <li>Scan the key QR (banner turns green when received)</li>
+            <li>Steady the phone — wait for the progress bar</li>
+            <li>Download link appears when complete</li>
+          </ol>
+          <a class="usage-link teal" href="./receive/">Open receiver →</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Footer ─────────────────────────────────────────────────── -->
+    <footer>
+      <div>
+        DECIMEN is open source — MIT licence.
+        This fork adds Phases 1–6 on top of the original proof-of-concept
+        by <a href="https://github.com/bashalarmistalt/decimen-optical-transfer" target="_blank" rel="noopener">bashalarmistalt</a>.
+        Fork source: <a href="https://github.com/bashalarmistalt/decimen-optical-transfer" target="_blank" rel="noopener">bashalarmistalt/decimen-optical-transfer</a>.
+      </div>
+      <div style="margin-top:8px;color:#5a5248;">
+        No analytics · No cookies · No server · Payload never leaves the room
+      </div>
+    </footer>
+
   </body>
 </html>
