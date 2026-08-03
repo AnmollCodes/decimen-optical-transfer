@@ -35,6 +35,7 @@ import { gzipDecompress } from "../shared/compress";
 import { aesGcmDecrypt, importKeyBytes } from "../shared/crypto";
 import { LTDecoder } from "../shared/fountain";
 import { fnv1a, parseFrame } from "../shared/protocol";
+import { isBundled, unbundleFiles } from "../shared/bundle";
 
 const OVERHEAD_EST = 1.18; // expected frames ≈ K × this (robust-soliton ε)
 
@@ -379,13 +380,65 @@ function finish(payload: Uint8Array, hashOk: boolean, seconds: number, totalLen:
   const kb = Math.round(totalLen / 1024);
   const rate = (totalLen / 1024 / seconds).toFixed(1);
   stats.textContent = `${kb} KB in ${seconds.toFixed(1)} s · ${rate} KB/s · hash ${hashOk ? "verified ✓" : "MISMATCH ✗"}`;
+
   const heading = document.createElement("div");
   heading.className = "done";
   heading.textContent = "Transfer Complete!";
-  const img = document.createElement("img");
-  img.className = "received";
-  img.src = URL.createObjectURL(new Blob([payload as BlobPart], { type: "image/png" }));
-  result.append(heading, img);
+  result.append(heading);
+
+  // Phase 4: parse DCMN bundle and offer correct-typed downloads.
+  // If the payload starts with the DCMN magic bytes, unbundle it;
+  // otherwise treat it as a raw legacy payload (image/png assumed).
+  const files = isBundled(payload) ? unbundleFiles(payload) : null;
+
+  if (files && files.length > 0) {
+    // --- Bundled path (Phase 4) ---
+    for (const file of files) {
+      // Copy into a plain ArrayBuffer-backed Uint8Array so Blob accepts it
+      // (TypeScript can't narrow Uint8Array<ArrayBufferLike> → Uint8Array<ArrayBuffer>)
+      const plainData = new Uint8Array(file.data.length);
+      plainData.set(file.data);
+      const blob = new Blob([plainData], { type: file.mime || "application/octet-stream" });
+      const url = URL.createObjectURL(blob);
+      const filename = file.name || "received-file";
+
+      // If the file is an image, show a preview.
+      if (file.mime.startsWith("image/")) {
+        const img = document.createElement("img");
+        img.className = "received";
+        img.src = url;
+        img.alt = filename;
+        result.append(img);
+      }
+
+      // Always offer a download link with the correct filename.
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      link.className = "download-link";
+      link.textContent = `⤓ Download ${filename} (${(file.data.length / 1024).toFixed(0)} KB)`;
+      link.style.cssText =
+        "display:block;margin:8px 0;padding:8px 12px;background:#1a1a2e;" +
+        "border:1px solid #4ecca3;border-radius:6px;color:#4ecca3;" +
+        "font-family:monospace;font-size:14px;text-decoration:none;";
+      result.append(link);
+    }
+
+    if (files.length > 1) {
+      const note = document.createElement("div");
+      note.style.cssText = "font-size:12px;color:#888;margin-top:8px;font-family:monospace;";
+      note.textContent = `✓ ${files.length} files received. Click each link to download individually.`;
+      result.append(note);
+    }
+  } else {
+    // --- Legacy raw path (pre-Phase-4 payload without DCMN magic) ---
+    const plain = new Uint8Array(payload.length);
+    plain.set(payload);
+    const img = document.createElement("img");
+    img.className = "received";
+    img.src = URL.createObjectURL(new Blob([plain], { type: "image/png" }));
+    result.append(img);
+  }
 }
 
 function updateStats() {
