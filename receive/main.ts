@@ -144,6 +144,26 @@ if (clearSessionsBtn) {
   };
 }
 
+// ── Feature detection (Part A-2 — iOS/Safari hardening) ──────────────────────
+// CompressionStream: Chrome 80+, Firefox 113+, Safari 16.4+.
+// SubtleCrypto: requires a secure context (HTTPS or localhost).
+// Check on page load — before the user taps Start — so they see a clear error
+// immediately rather than a crash mid-transfer.
+if (typeof CompressionStream === "undefined") {
+  stats.textContent =
+    "✗ Your browser doesn't support the Compression Streams API. " +
+    "Try Chrome 80+, Firefox 113+, or update Safari to 16.4+.";
+  startBtn.disabled = true;
+  startBtn.style.opacity = "0.4";
+}
+if (!window.crypto?.subtle) {
+  stats.textContent =
+    "✗ WebCrypto (crypto.subtle) is not available. " +
+    "This page requires HTTPS — make sure you opened the https:// address.";
+  startBtn.disabled = true;
+  startBtn.style.opacity = "0.4";
+}
+
 // Phase 5: check for saved sessions on page load.
 void checkForSavedSession();
 
@@ -170,10 +190,10 @@ async function checkForSavedSession(): Promise<void> {
   resumeBanner.innerHTML =
     `<strong>↻ Interrupted transfer found</strong> — ${pct}% of ${sizeStr} received (${ageStr})<br>` +
     `<div style="margin-top:8px;display:flex;gap:8px;">` +
-    `<button id="btn-resume" style="padding:6px 14px;background:#4c1d95;color:#a78bfa;` +
+    `<button id="btn-resume" aria-label="Resume interrupted transfer at ${pct} percent" style="padding:6px 14px;background:#4c1d95;color:#a78bfa;` +
       `border:1px solid #a78bfa;border-radius:5px;font-family:monospace;cursor:pointer;">` +
       `Resume (${pct}% done)</button>` +
-    `<button id="btn-fresh" style="padding:6px 14px;background:#1a1a2e;color:#888;` +
+    `<button id="btn-fresh" aria-label="Discard saved session and start fresh" style="padding:6px 14px;background:#1a1a2e;color:#888;` +
       `border:1px solid #555;border-radius:5px;font-family:monospace;cursor:pointer;">` +
       `Start fresh</button>` +
     `</div>`;
@@ -237,10 +257,15 @@ async function resumeFromSaved(saved: SavedSession): Promise<void> {
 }
 
 async function start() {
+  // Guard: if a required API was missing at page load, don't try to start.
+  if (startBtn.disabled) return;
+
   if (!navigator.mediaDevices?.getUserMedia) {
+    // getUserMedia is unavailable. Most common cause: non-HTTPS context.
+    // (The deployed site at github.io is HTTPS, so this should not normally trigger.)
     stats.textContent =
-      "✗ camera needs a secure context — this page must be served over " +
-      "https to use the camera from another device (npm run dev:https).";
+      "✗ Camera access requires a secure context (HTTPS). " +
+      "Make sure you opened the https:// address, not http://.";
     return;
   }
   const captureWidth = Number((document.getElementById("cfg-width") as HTMLSelectElement).value);
@@ -284,7 +309,20 @@ async function start() {
       });
     }
   } catch (err) {
-    stats.textContent = `✗ camera: ${err instanceof Error ? err.message : String(err)}`;
+    // Translate common DOMException names into plain language.
+    const name = err instanceof DOMException ? err.name : "";
+    if (name === "NotAllowedError") {
+      stats.textContent =
+        "✗ Camera permission denied. Tap the camera icon in your browser's address bar and allow access, then tap Start again.";
+    } else if (name === "NotFoundError") {
+      stats.textContent =
+        "✗ No camera found. Make sure a camera is connected and not in use by another app.";
+    } else if (name === "NotReadableError" || name === "AbortError") {
+      stats.textContent =
+        `✗ Camera couldn't start (${name}) — another app may be using it. Close other camera apps and try again.`;
+    } else {
+      stats.textContent = `✗ Camera error: ${err instanceof Error ? err.message : String(err)}`;
+    }
     return;
   }
   video.srcObject = stream;

@@ -101,6 +101,28 @@ gridBanner.style.cssText =
   "padding:8px;margin:8px 0;border-radius:6px;border:3px solid;";
 specs.insertAdjacentElement("afterend", gridBanner);
 
+// Copy-to-clipboard button: lets receiver match settings without re-reading
+// the screen. Inserted once alongside gridBanner; only appears after first stream.
+const copySpecsBtn = document.createElement("button");
+copySpecsBtn.id = "copy-specs-btn";
+copySpecsBtn.textContent = "⎘ copy settings";
+copySpecsBtn.style.cssText =
+  "display:none;font-family:monospace;font-size:11px;padding:3px 10px;" +
+  "background:#1b1712;color:#ffb257;border:1px solid #ffb257;border-radius:0;" +
+  "cursor:pointer;margin-top:4px;";
+copySpecsBtn.setAttribute("aria-label", "Copy current sender settings to clipboard");
+copySpecsBtn.onclick = () => {
+  const text = specs.textContent ?? "";
+  void navigator.clipboard?.writeText(text).then(() => {
+    copySpecsBtn.textContent = "✓ copied";
+    setTimeout(() => { copySpecsBtn.textContent = "⎘ copy settings"; }, 1800);
+  }).catch(() => {
+    copySpecsBtn.textContent = "✗ copy failed";
+    setTimeout(() => { copySpecsBtn.textContent = "⎘ copy settings"; }, 1800);
+  });
+};
+gridBanner.insertAdjacentElement("afterend", copySpecsBtn);
+
 async function loadPayload(url: string): Promise<Uint8Array | null> {
   const hit = payloadCache.get(url);
   if (hit) return hit;
@@ -121,6 +143,24 @@ async function renderKeyQr(text: string): Promise<void> {
 }
 
 async function main() {
+  // ── Feature detection ────────────────────────────────────────────────────
+  // CompressionStream: Chrome 80+, Firefox 113+, Safari 16.4+.
+  // SubtleCrypto: available on any HTTPS/localhost secure context.
+  // Both are required — if either is missing, show a specific error instead of
+  // crashing silently on the first compress/encrypt call.
+  if (typeof CompressionStream === "undefined") {
+    specs.textContent =
+      "✗ Your browser doesn't support the Compression Streams API. " +
+      "Try Chrome 80+, Firefox 113+, or update Safari to 16.4+.";
+    return;
+  }
+  if (!window.crypto?.subtle) {
+    specs.textContent =
+      "✗ WebCrypto (crypto.subtle) is not available. " +
+      "This page must be served over HTTPS — open it at the https:// address.";
+    return;
+  }
+
   const controls = [cfgPayload, cfgFps, cfgBytes, cfgEcc, cfgSize];
   if (cfgGrid) controls.push(cfgGrid);
   for (const el of controls) {
@@ -342,8 +382,10 @@ async function startStream() {
           `${Math.round(rawPayload.length / 1024)} KB raw → ` +
           `${Math.round(compressed.length / 1024)} KB compressed → ` +
           `${Math.round(payload.length / 1024)} KB encrypted · K=${encoder.k}`;
+        copySpecsBtn.style.display = "inline-block";
       }
       cells.push(img);
+
     }
 
     // Composite cells into the grid with CELL_GAP white separation between them.
@@ -372,7 +414,7 @@ async function startStream() {
     try {
       while (queue.length < LOOKAHEAD) queue.push(makeGridFrame());
     } catch (err) {
-      specs.textContent = `✗ ${err instanceof Error ? err.message : String(err)}`;
+      specs.textContent = `✗ QR render error: ${err instanceof Error ? err.message : String(err)}`;
       return;
     }
     setTimeout(pump, 0);

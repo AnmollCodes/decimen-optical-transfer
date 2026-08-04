@@ -412,6 +412,132 @@
         .stats-bar { gap: 24px; }
         .nav-links { display: none; }
       }
+
+      /* ── Demo animation ─────────────────────────────────────────────── */
+      .demo-wrap {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 32px;
+        padding: 40px 24px;
+        background: var(--bg2);
+        border-top: 1px solid var(--border);
+        border-bottom: 1px solid var(--border);
+        overflow: hidden;
+      }
+      /* Sender screen box */
+      .demo-screen {
+        width: 120px;
+        height: 90px;
+        border: 2px solid var(--amber);
+        background: #fff;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        grid-template-rows: 1fr 1fr;
+        gap: 4px;
+        padding: 6px;
+        position: relative;
+        flex-shrink: 0;
+      }
+      .demo-screen::before {
+        content: 'SENDER';
+        position: absolute;
+        top: -18px;
+        left: 0;
+        right: 0;
+        text-align: center;
+        font: 700 9px/1 var(--mono);
+        color: var(--amber);
+        letter-spacing: 0.08em;
+      }
+      /* Each QR cell flickers through its content */
+      .demo-cell {
+        background: var(--amber);
+        opacity: 0.85;
+        animation: qr-flicker 0.32s steps(1) infinite;
+      }
+      .demo-cell:nth-child(1) { animation-delay:    0ms; }
+      .demo-cell:nth-child(2) { animation-delay:   80ms; }
+      .demo-cell:nth-child(3) { animation-delay:  160ms; }
+      .demo-cell:nth-child(4) { animation-delay:  240ms; }
+      @keyframes qr-flicker {
+        0%   { opacity: 0.9; background: var(--amber); }
+        25%  { opacity: 0.4; background: #2e2718; }
+        50%  { opacity: 0.85; background: var(--amber); }
+        75%  { opacity: 0.2; background: #2e2718; }
+        100% { opacity: 0.9; background: var(--amber); }
+      }
+      /* Photon beam between screen and camera */
+      .demo-beam {
+        flex: 1;
+        height: 2px;
+        background: linear-gradient(90deg, var(--amber) 0%, var(--teal) 100%);
+        position: relative;
+        max-width: 120px;
+        min-width: 48px;
+      }
+      .demo-beam::after {
+        content: '';
+        position: absolute;
+        top: -3px;
+        left: 0;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--teal);
+        animation: photon-travel 0.9s linear infinite;
+      }
+      @keyframes photon-travel {
+        from { left: 0%; opacity: 1; }
+        to   { left: calc(100% - 8px); opacity: 0.2; }
+      }
+      /* Camera/receiver box */
+      .demo-camera {
+        width: 72px;
+        height: 72px;
+        border: 2px solid var(--teal);
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        position: relative;
+        flex-shrink: 0;
+        background: var(--bg3);
+        animation: lens-pulse 1.8s ease-in-out infinite;
+      }
+      .demo-camera::before {
+        content: 'RECEIVER';
+        position: absolute;
+        top: -18px;
+        left: 50%;
+        transform: translateX(-50%);
+        font: 700 9px/1 var(--mono);
+        color: var(--teal);
+        letter-spacing: 0.08em;
+        white-space: nowrap;
+      }
+      .demo-camera::after {
+        content: '';
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        border: 2px solid var(--teal);
+        background: #0d2b22;
+        animation: lens-pulse 1.8s ease-in-out infinite reverse;
+      }
+      @keyframes lens-pulse {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(78, 204, 163, 0);
+                   border-color: var(--teal); }
+        50% { box-shadow: 0 0 12px 4px rgba(78, 204, 163, 0.25);
+              border-color: #6eefd4; }
+      }
+      .demo-caption {
+        font-size: 11px;
+        color: var(--muted);
+        text-align: center;
+        letter-spacing: 0.04em;
+        margin-top: 10px;
+      }
     </style>
   </head>
   <body>
@@ -508,6 +634,22 @@
         </div>
       </div>
     </section>
+
+    <!-- ── Demo animation ──────────────────────────────────────────── -->
+    <div style="background:var(--bg2);border-top:1px solid var(--border);border-bottom:1px solid var(--border);padding:32px 24px 24px;">
+      <div class="section-title" style="margin-bottom:24px;">How it looks in practice</div>
+      <div class="demo-wrap">
+        <div class="demo-screen" aria-hidden="true">
+          <div class="demo-cell"></div>
+          <div class="demo-cell"></div>
+          <div class="demo-cell"></div>
+          <div class="demo-cell"></div>
+        </div>
+        <div class="demo-beam" aria-hidden="true"></div>
+        <div class="demo-camera" aria-hidden="true"></div>
+      </div>
+      <p class="demo-caption">The sender renders a 2×2 grid of animated QR codes. Hold your phone's camera up to the screen — no app, no pairing, no network required.</p>
+    </div>
 
     <!-- ── Phase feature log ──────────────────────────────────────── -->
     <section class="section" id="phases">
