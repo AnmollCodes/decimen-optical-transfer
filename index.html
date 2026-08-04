@@ -5,6 +5,24 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>DECIMEN — Fountain QR File Transfer</title>
     <meta name="description" content="Transfer files between devices using nothing but a screen and a camera. Fountain-coded animated QR codes, AES-256-GCM encryption, no network required." />
+
+    <!-- Favicon -->
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+
+    <!-- Open Graph -->
+    <meta property="og:type"        content="website" />
+    <meta property="og:url"         content="https://anmollcodes.github.io/decimen-optical-transfer/" />
+    <meta property="og:title"       content="DECIMEN — Fountain QR File Transfer" />
+    <meta property="og:description" content="Send files between devices using only a screen and a camera — fountain-coded, AES-256-GCM encrypted, no Wi-Fi or pairing needed." />
+    <meta property="og:image"       content="https://anmollcodes.github.io/decimen-optical-transfer/og-preview.png" />
+    <meta property="og:image:width"  content="1200" />
+    <meta property="og:image:height" content="630" />
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card"        content="summary_large_image" />
+    <meta name="twitter:title"       content="DECIMEN — Fountain QR File Transfer" />
+    <meta name="twitter:description" content="Send files between devices using only a screen and a camera — fountain-coded, AES-256-GCM encrypted, no Wi-Fi or pairing needed." />
+    <meta name="twitter:image"       content="https://anmollcodes.github.io/decimen-optical-transfer/og-preview.png" />
     <style>
       /* ── Design tokens ── same palette as shared/style.css ─────────── */
       :root {
@@ -140,6 +158,13 @@
         background: var(--teal);
         color: var(--bg);
         text-decoration: none;
+      }
+      .hero-note {
+        margin-top: 16px;
+        font-size: 11px;
+        color: var(--muted);
+        letter-spacing: 0.04em;
+        opacity: 0.8;
       }
 
       /* ── Stats bar ──────────────────────────────────────────────────── */
@@ -416,6 +441,7 @@
         <a class="btn-primary" href="./send/">Open sender →</a>
         <a class="btn-secondary" href="./receive/">Open receiver →</a>
       </div>
+      <p class="hero-note">Both devices must be in the same room — the receiver's camera needs a clear line of sight to the sender's screen.</p>
     </section>
 
     <!-- ── Measured stats ─────────────────────────────────────────── -->

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Dark background -->
+  <rect width="32" height="32" fill="#121009"/>
+  <!-- Amber "D" lettermark with QR-finder-pattern corner squares motif -->
+  <!-- Top-left finder corner -->
+  <rect x="2" y="2" width="6" height="6" fill="#ffb257"/>
+  <rect x="3" y="3" width="4" height="4" fill="#121009"/>
+  <rect x="4" y="4" width="2" height="2" fill="#ffb257"/>
+  <!-- Top-right finder corner (teal accent) -->
+  <rect x="24" y="2" width="6" height="6" fill="#4ecca3"/>
+  <rect x="25" y="3" width="4" height="4" fill="#121009"/>
+  <rect x="26" y="4" width="2" height="2" fill="#4ecca3"/>
+  <!-- Bottom-left finder corner -->
+  <rect x="2" y="24" width="6" height="6" fill="#ffb257"/>
+  <rect x="3" y="25" width="4" height="4" fill="#121009"/>
+  <rect x="4" y="26" width="2" height="2" fill="#ffb257"/>
+  <!-- Center "D" letter in amber -->
+  <text x="16" y="22" text-anchor="middle" font-family="monospace" font-size="13" font-weight="bold" fill="#ffb257">D</text>
+</svg>
